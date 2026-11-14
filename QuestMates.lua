@@ -624,7 +624,11 @@ local function AnchorPanel()
     panel:SetPoint("BOTTOMLEFT", WorldMapFrame, "BOTTOMRIGHT", -2, 0)
     panel.inMap = false
   end
-  panel:SetFrameLevel((q or WorldMapFrame):GetFrameLevel() + 30)
+  -- one strata above the map so the quest log's own scroll lists can never draw on top
+  local up = { BACKGROUND = "LOW", LOW = "MEDIUM", MEDIUM = "HIGH", HIGH = "DIALOG", DIALOG = "FULLSCREEN", FULLSCREEN = "FULLSCREEN_DIALOG" }
+  panel:SetFrameStrata(up[WorldMapFrame:GetFrameStrata()] or "DIALOG")
+  panel:SetFrameLevel(50)
+  panel:Raise()
 end
 
 local function MakePanel()

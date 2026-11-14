@@ -676,7 +676,15 @@ local function MakePanel()
   local b = CreateFrame("Button", "QuestMatesTab", border)
   b.Reanchor = function(self)
     self:ClearAllPoints()
-    if db.buttonStyle == "side" then         -- classic: tab sticking out of the map's right edge
+    local toggle = WorldMapFrame.SidePanelToggle or (WorldMapFrame.ScrollContainer and WorldMapFrame.SidePanelToggle)
+    if (db.buttonStyle == "stack" or db.buttonStyle == nil) and toggle then  -- stacked above the map's quest-log "?" toggle
+      self:SetParent(toggle:GetParent() or WorldMapFrame)
+      local w, h = toggle:GetSize()
+      self:SetSize(w > 0 and w or 32, h > 0 and h or 32)
+      self:SetPoint("BOTTOM", toggle, "TOP", 0, 2)
+      self:SetFrameStrata(toggle:GetFrameStrata())
+      self:SetFrameLevel(toggle:GetFrameLevel() + 1)
+    elseif db.buttonStyle == "side" then         -- classic: tab sticking out of the map's right edge
       self:SetParent(WorldMapFrame)
       self:SetSize(34, 44)
       local edgeOf = (panel and panel:IsShown() and not panel.inMap) and panel or WorldMapFrame
@@ -706,7 +714,7 @@ local function MakePanel()
     RefreshList()
   end)
   b:SetScript("OnEnter", function(s)
-    GameTooltip:SetOwner(s, "ANCHOR_BOTTOM")
+    GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
     GameTooltip:AddLine("QuestMates")
     GameTooltip:AddLine(db.panelOpen and "Back to your quests" or "Show your group's quests", 1, 1, 1)
     GameTooltip:Show()
@@ -1034,7 +1042,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.alerts == nil then db.alerts = true end
     if db.itemAlerts == nil then db.itemAlerts = true end
     if db.combatWarn == nil then db.combatWarn = true end
-    db.buttonStyle = db.buttonStyle or "title"
+    if not db.stackDefaulted then db.buttonStyle = "stack"; db.stackDefaulted = true end
     db.panelStyle = db.panelStyle or "inside"
     db.trackerStyle = db.trackerStyle or "native"
     C_Timer.After(0, MakeOptions)
@@ -1220,7 +1228,7 @@ MakeOptions = function()
 
   header("Map window")
   check("Show the QuestMates button on the map", function() return db.dock ~= false end, function(v) db.dock = v end)
-  choice("Button style", "buttonStyle", { { "title", "Title bar icon" }, { "side", "Side tab (classic)" } })
+  choice("Button style", "buttonStyle", { { "stack", "Above the ? button" }, { "title", "Title bar" }, { "side", "Side tab (classic)" } })
   choice("Party quests show", "panelStyle", { { "inside", "Over my quest list" }, { "side", "Beside the map (classic)" } })
   y = y - 6
   header("Map")

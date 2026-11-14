@@ -12,6 +12,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 - Floating list when the map is closed
 - Alert + sound when a friend picks up the same quest as you
 - Chat message whenever a friend loots a quest item
+- Quest links in chat get a stamp: green check = done, yellow **?** = in your log (formerly the QuestStamp addon)
 
 **Everyone in the group needs QuestMates installed.**
 
@@ -32,3 +33,6 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 | `/qm sync` | Ask the group to resend quests |
 | `/qm clear` | Clear your progress spots |
 | `/qm debug` | Diagnostics |
+| `/qs` | Quest link stamp help |
+| `/qs new` | Red X on quests you haven't done on/off |
+| `/qs toggle` | Quest link stamps on/off |

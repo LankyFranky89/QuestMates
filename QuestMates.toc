@@ -1,9 +1,10 @@
 ## Interface: 16001
 ## Title: QuestMates
-## Notes: Shows your party members' quests on the world map in their own color, plus a list of who is on what. Everyone in the group needs QuestMates.
+## Notes: Shows your party members' quests on the world map in their own color, plus a list of who is on what. Also marks quest links in chat as done/in log. Everyone in the group needs QuestMates.
 ## Author: Frank
-## Version: 1.4.3
+## Version: 1.5.0
 ## SavedVariables: QuestMatesDB
 ## SavedVariablesPerCharacter: QuestMatesCharDB
 
 QuestMates.lua
+Stamp.lua

@@ -840,7 +840,6 @@ local function PlaceList()
   if db.pos then list:SetPoint(db.pos[1], UIParent, db.pos[2], db.pos[3], db.pos[4])
   else list:SetPoint("RIGHT", UIParent, "RIGHT", -40, 80) end
   list:SetScale(db.scale or 1.15)
-  PlaceTracker()
 end
 
 ------------------------------------------------------------------------
@@ -886,7 +885,9 @@ local function PlaceTracker()
   else trk:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -90, -330) end
 end
 
+local trkPlaced = false
 local function RefreshTracker(rows)
+  if not trkPlaced then PlaceTracker(); trkPlaced = true end
   for _, l in ipairs(trkLines) do l:Hide() end
   trk:SetScale(db.trackerScale or 1)
   minBtn:SetNormalTexture(db.trackerMin and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")

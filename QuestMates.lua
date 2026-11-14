@@ -697,9 +697,13 @@ local function MakePanel()
       self:SetPoint("BOTTOM", toggle, "TOP", 0, 2)
       self:SetFrameStrata(toggle:GetFrameStrata())
       self:SetFrameLevel(toggle:GetFrameLevel() + 1)
-      self.icon:Hide(); self.inner:Show(); self.q:Show()
+      self.icon:Hide()
+      if not self.skinned then self.skinned = true; self:SkinLike(toggle) end
+      self.inner:SetShown(not self.native); self.q:SetShown(not self.native)
+      if self.native then self.edge:Hide() end
     elseif db.buttonStyle == "side" then         -- classic: tab sticking out of the map's right edge
       self.icon:Show(); self.inner:Hide(); self.q:Hide()
+      self.edge:Show(); if self.nat then for _, t in pairs(self.nat) do t:Hide() end end
       self:SetParent(WorldMapFrame)
       self:SetSize(34, 44)
       local edgeOf = (panel and panel:IsShown() and not panel.inMap) and panel or WorldMapFrame
@@ -708,6 +712,7 @@ local function MakePanel()
       self:SetFrameLevel(edgeOf:GetFrameLevel() + 20)
     else                                      -- title bar, next to maximize/close
       self.icon:Show(); self.inner:Hide(); self.q:Hide()
+      self.edge:Show(); if self.nat then for _, t in pairs(self.nat) do t:Hide() end end
       self:SetParent(border)
       self:SetSize(22, 22)
       if anchor then self:SetPoint("RIGHT", anchor, "LEFT", -2, 0) else self:SetPoint("TOPRIGHT", WorldMapFrame, "TOPRIGHT", -60, -2) end
@@ -728,6 +733,41 @@ local function MakePanel()
   b.q:SetPoint("CENTER", 1, 0); b.q:SetText("?"); b.q:SetTextColor(0.35, 1, 0.3)
   b.q:SetShadowOffset(1, -1)
   b.icon = icon
+  b.edge = edge
+  -- copy the look of the map's own ? toggle, tinted green
+  function b:SkinLike(toggle)
+    local src = (toggle.OpenButton and toggle.OpenButton:IsShown() and toggle.OpenButton) or toggle.OpenButton or toggle.CloseButton or toggle
+    local function copy(getter, layer)
+      local t = src[getter] and src[getter](src)
+      if not t then return end
+      local n = self:CreateTexture(nil, layer)
+      local atlas = t.GetAtlas and t:GetAtlas()
+      if atlas then n:SetAtlas(atlas) else
+        local file = t:GetTexture(); if not file then return end
+        n:SetTexture(file); n:SetTexCoord(t:GetTexCoord())
+      end
+      n:SetAllPoints()
+      return n
+    end
+    self.nat = {
+      normal = copy("GetNormalTexture", "ARTWORK"),
+      hl = copy("GetHighlightTexture", "HIGHLIGHT"),
+    }
+    if self.nat.normal then
+      self.native = true
+      self.nat.normal:SetDesaturated(true)
+      self.nat.normal:SetVertexColor(0.45, 1, 0.35)
+      if self.nat.hl then self.nat.hl:SetBlendMode("ADD") end
+      local p = copy("GetPushedTexture", "ARTWORK")
+      if p then
+        p:SetDesaturated(true); p:SetVertexColor(0.45, 1, 0.35); p:Hide()
+        self:HookScript("OnMouseDown", function() p:Show(); self.nat.normal:Hide() end)
+        self:HookScript("OnMouseUp", function() p:Hide(); self.nat.normal:Show() end)
+        self.nat.pushed = p
+      end
+      self:SetHighlightTexture("")
+    end
+  end
   b.on = b:CreateTexture(nil, "OVERLAY")
   b.on:SetTexture("Interface\\Buttons\\CheckButtonHilight"); b.on:SetBlendMode("ADD"); b.on:SetAllPoints()
   b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")

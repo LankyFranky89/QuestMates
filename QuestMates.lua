@@ -606,84 +606,92 @@ end
 local panel, tab, scroll, content
 local panelRows = {}
 
+local function QuestListArea()
+  local q = QuestMapFrame or (WorldMapFrame and WorldMapFrame.QuestLog)
+  if q and q:IsVisible() and (q:GetWidth() or 0) > 100 then return q end
+end
+
+local function AnchorPanel()
+  if not panel then return end
+  panel:ClearAllPoints()
+  local q = QuestListArea()
+  if q then
+    panel:SetAllPoints(q)            -- sits on top of your quest list
+    panel.inMap = true
+  else                                -- map minimized / quest list hidden: show beside the map
+    panel:SetWidth(300)
+    panel:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -2, 0)
+    panel:SetPoint("BOTTOMLEFT", WorldMapFrame, "BOTTOMRIGHT", -2, 0)
+    panel.inMap = false
+  end
+  panel:SetFrameLevel((q or WorldMapFrame):GetFrameLevel() + 30)
+end
+
 local function MakePanel()
   if panel or not WorldMapFrame then return end
-  local ok, f = pcall(CreateFrame, "Frame", "QuestMatesPanel", WorldMapFrame, "ButtonFrameTemplate")
-  if not ok or not f then
-    f = CreateFrame("Frame", "QuestMatesPanel", WorldMapFrame, BackdropTemplateMixin and "BackdropTemplate" or nil)
-    if f.SetBackdrop then
-      f:SetBackdrop({ bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border", tile = true, tileSize = 32, edgeSize = 32,
-        insets = { left = 8, right = 8, top = 8, bottom = 8 } })
-    end
-    local t = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    t:SetPoint("TOP", 0, -14); t:SetText("QuestMates")
-    local x = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    x:SetPoint("TOPRIGHT", -4, -4); f.CloseButton = x
-  else
-    if ButtonFrameTemplate_HidePortrait then pcall(ButtonFrameTemplate_HidePortrait, f) end
-    if ButtonFrameTemplate_HideButtonBar then pcall(ButtonFrameTemplate_HideButtonBar, f) end
-    if f.SetTitle then f:SetTitle("QuestMates")
-    elseif f.TitleText then f.TitleText:SetText("QuestMates")
-    elseif f.TitleContainer and f.TitleContainer.TitleText then f.TitleContainer.TitleText:SetText("QuestMates") end
+  local f = CreateFrame("Frame", "QuestMatesPanel", WorldMapFrame, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  if f.SetBackdrop then
+    f:SetBackdrop({ bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12,
+      insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+    f:SetBackdropColor(0.08, 0.06, 0.03, 1)
+    f:SetBackdropBorderColor(0.75, 0.6, 0.3, 1)
   end
-  f:SetWidth(320)
-  f:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -2, 0)
-  f:SetPoint("BOTTOMLEFT", WorldMapFrame, "BOTTOMRIGHT", -2, 0)
   f:SetFrameStrata(WorldMapFrame:GetFrameStrata())
   f:EnableMouse(true)
   f:Hide()
-  if f.CloseButton then
-    f.CloseButton:SetScript("OnClick", function() db.panelOpen = false; f:Hide(); RefreshList() end)
-  end
-  local area = f.Inset or f
+
+  local head = f:CreateTexture(nil, "ARTWORK")
+  head:SetTexture(MEDIA .. "PartyIcon"); head:SetSize(22, 22); head:SetPoint("TOPLEFT", 8, -7)
+  local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  title:SetPoint("LEFT", head, "RIGHT", 6, 0); title:SetText("Party quests")
+  local back = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  back:SetSize(84, 20); back:SetPoint("TOPRIGHT", -6, -7); back:SetText("My quests")
+  back:SetScript("OnClick", function() db.panelOpen = false; RefreshList() end)
+  f.CloseButton = back
+
   local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
-  sf:SetPoint("TOPLEFT", area, "TOPLEFT", f.Inset and 6 or 14, f.Inset and -6 or -36)
-  sf:SetPoint("BOTTOMRIGHT", area, "BOTTOMRIGHT", f.Inset and -30 or -36, f.Inset and 6 or 14)
+  sf:SetPoint("TOPLEFT", 8, -34)
+  sf:SetPoint("BOTTOMRIGHT", -28, 8)
   local c = CreateFrame("Frame", nil, sf)
   c:SetSize(240, 10)
   sf:SetScrollChild(c)
   scroll, content, panel = sf, c, f
 
-  -- side tab, like the map's other edge buttons
-  local b = CreateFrame("Button", "QuestMatesTab", WorldMapFrame)
-  b:SetSize(34, 44)
-  b:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -4, -70)
-  b.Reanchor = function(self)
-    self:ClearAllPoints()
-    if panel and panel:IsShown() then
-      self:SetPoint("TOPLEFT", panel, "TOPRIGHT", -2, -70)
-    else
-      self:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -4, -70)
-    end
-  end
-  b:SetFrameStrata(WorldMapFrame:GetFrameStrata())
-  b:SetFrameLevel(WorldMapFrame:GetFrameLevel() + 20)
-  local bg = b:CreateTexture(nil, "BACKGROUND")
-  bg:SetTexture("Interface\\Buttons\\WHITE8X8"); bg:SetVertexColor(0.12, 0.08, 0.04, 0.95); bg:SetAllPoints()
-  local edge = b:CreateTexture(nil, "BORDER")
-  edge:SetTexture("Interface\\Buttons\\WHITE8X8"); edge:SetVertexColor(0.75, 0.6, 0.3, 1)
-  edge:SetPoint("TOPLEFT", -1, 1); edge:SetPoint("BOTTOMRIGHT", 1, -1)
-  edge:SetDrawLayer("BACKGROUND", -1)
+  -- small button in the map's title bar, next to maximize/close
+  local border = WorldMapFrame.BorderFrame or WorldMapFrame
+  local anchor = (border.MaximizeMinimizeFrame) or (WorldMapFrame.MaximizeMinimizeFrame) or border.CloseButton or WorldMapFrame.CloseButton
+  local b = CreateFrame("Button", "QuestMatesTab", border)
+  b:SetSize(22, 22)
+  if anchor then b:SetPoint("RIGHT", anchor, "LEFT", -2, 0) else b:SetPoint("TOPRIGHT", WorldMapFrame, "TOPRIGHT", -60, -2) end
+  b:SetFrameLevel((anchor or border):GetFrameLevel() + 5)
+  b.Reanchor = function() end
+  local edge = b:CreateTexture(nil, "BACKGROUND")
+  edge:SetTexture("Interface\\Buttons\\WHITE8X8"); edge:SetVertexColor(0.75, 0.6, 0.3, 1); edge:SetAllPoints()
   local icon = b:CreateTexture(nil, "ARTWORK")
   icon:SetTexture(MEDIA .. "PartyIcon")
-  icon:SetTexCoord(0, 1, 0, 1)
   icon:SetPoint("TOPLEFT", 1, -1); icon:SetPoint("BOTTOMRIGHT", -1, 1)
+  b.on = b:CreateTexture(nil, "OVERLAY")
+  b.on:SetTexture("Interface\\Buttons\\CheckButtonHilight"); b.on:SetBlendMode("ADD"); b.on:SetAllPoints()
   b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
-  b.badge = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
-  b.badge:SetPoint("BOTTOMRIGHT", -2, 2)
+  b.badge = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+  b.badge:SetPoint("BOTTOMRIGHT", 2, -2)
   b:SetScript("OnClick", function()
     db.panelOpen = not db.panelOpen
     RefreshList()
   end)
   b:SetScript("OnEnter", function(s)
-    GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+    GameTooltip:SetOwner(s, "ANCHOR_BOTTOM")
     GameTooltip:AddLine("QuestMates")
-    GameTooltip:AddLine("Your group's quests", 1, 1, 1)
+    GameTooltip:AddLine(db.panelOpen and "Back to your quests" or "Show your group's quests", 1, 1, 1)
     GameTooltip:Show()
   end)
   b:SetScript("OnLeave", function() GameTooltip:Hide() end)
   tab = b
+  if QuestMapFrame then
+    QuestMapFrame:HookScript("OnShow", function() C_Timer.After(0, RefreshList) end)
+    QuestMapFrame:HookScript("OnHide", function() C_Timer.After(0, RefreshList) end)
+  end
 end
 
 local function PanelRow(i)
@@ -721,9 +729,10 @@ local function RefreshPanel()
   tab:SetShown(mapOpen and db.dock ~= false)
   local rows, nFriends = BuildRows()
   tab.badge:SetText(nFriends > 0 and nFriends or "")
-  if not (mapOpen and db.panelOpen and db.dock ~= false) then panel:Hide(); tab:Reanchor(); return end
+  tab.on:SetShown(db.panelOpen and true or false)
+  if not (mapOpen and db.panelOpen and db.dock ~= false) then panel:Hide(); return end
+  AnchorPanel()
   panel:Show()
-  tab:Reanchor()
   local w = scroll:GetWidth()
   if not w or w < 50 then
     w = 250
@@ -905,9 +914,9 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
       WorldMapFrame:HookScript("OnHide", function() C_Timer.After(0, RefreshList) end)
       WorldMapFrame:HookScript("OnShow", RefreshPins)
       if WorldMapFrame.OnMapChanged then hooksecurefunc(WorldMapFrame, "OnMapChanged", RefreshPins) end
-      WorldMapFrame:HookScript("OnSizeChanged", function() C_Timer.After(0, RefreshPins) end)
-      if WorldMapFrame.Maximize then hooksecurefunc(WorldMapFrame, "Maximize", RefreshPins) end
-      if WorldMapFrame.Minimize then hooksecurefunc(WorldMapFrame, "Minimize", RefreshPins) end
+      WorldMapFrame:HookScript("OnSizeChanged", function() C_Timer.After(0, RefreshAll) end)
+      if WorldMapFrame.Maximize then hooksecurefunc(WorldMapFrame, "Maximize", function() C_Timer.After(0, RefreshAll) end) end
+      if WorldMapFrame.Minimize then hooksecurefunc(WorldMapFrame, "Minimize", function() C_Timer.After(0, RefreshAll) end) end
     end
   elseif not db then
     return
@@ -1063,7 +1072,7 @@ SlashCmdList.QUESTMATES = function(msg)
     Print("Missing-quest pull warning " .. (db.combatWarn and "on" or "off"))
   elseif msg == "dock" then
     db.dock = (db.dock == false); RefreshList()
-    Print("Map tab and side panel " .. (db.dock ~= false and "on" or "off"))
+    Print("Map title-bar button " .. (db.dock ~= false and "on" or "off"))
   elseif msg:match("^scale") then
     local v = tonumber(msg:match("^scale%s+([%d%.]+)"))
     if v and v >= 0.5 and v <= 2.5 then db.scale = v; RefreshList(); Print("Size set to " .. v)
@@ -1082,7 +1091,7 @@ SlashCmdList.QUESTMATES = function(msg)
       .. " GetNextWaypoint=" .. tostring(C_QuestLog and C_QuestLog.GetNextWaypoint ~= nil)
       .. " GetQuestObjectives=" .. tostring(C_QuestLog and C_QuestLog.GetQuestObjectives ~= nil))
     Print("Group channel: " .. tostring(Channel()))
-    Print("Side panel: " .. (panel and "ready" or "not created") .. ", template: " .. tostring(panel and panel.Inset ~= nil and "Blizzard" or "fallback"))
+    Print("Side panel: " .. (panel and "ready" or "not created") .. ", in quest list: " .. tostring(panel and panel.inMap))
     for who, fr in pairs(friends) do
       local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
       Print(string.format("  %s: %d quests received", who, c))
@@ -1090,6 +1099,6 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm - show/hide the floating list (or click the tab on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map tab on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

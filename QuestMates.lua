@@ -1,0 +1,949 @@
+-- QuestMates: see your party members' quests on the world map in their own color.
+-- Every player who wants to SHARE quests needs QuestMates installed.
+local ADDON = ...
+local PREFIX = "QMATES1"
+local MEDIA = "Interface\\AddOns\\QuestMates\\"
+local SEP, OSEP, FSEP, PSEP = "~", "`", "^", ";"
+
+local db, cdb
+local friends = {}        -- [name] = { quests = { [qid] = q }, last = time }
+local myQuests = {}       -- [qid] = q (my current log, for "shared" checks)
+local mySnapshot = {}     -- [qid] = { [objIndex] = numFulfilled } for progress pins
+local lastSent = {}       -- [qid] = payload string
+local scanned = false
+local Alert -- defined further down, used by ScanLog
+
+local PALETTE = {
+  { 0.20, 0.85, 1.00 }, -- cyan
+  { 1.00, 0.35, 0.85 }, -- pink
+  { 0.40, 1.00, 0.30 }, -- lime
+  { 1.00, 0.55, 0.10 }, -- orange
+  { 0.45, 0.50, 1.00 }, -- blue
+  { 1.00, 0.25, 0.25 }, -- red
+  { 0.75, 0.45, 1.00 }, -- purple
+  { 0.20, 1.00, 0.75 }, -- teal
+}
+local GOLD = { 1.00, 0.82, 0.00 }
+
+local function Print(msg) DEFAULT_CHAT_FRAME:AddMessage("|cff33d9ffQuestMates:|r " .. tostring(msg)) end
+
+local function Short(name)
+  if not name then return nil end
+  if Ambiguate then return Ambiguate(name, "none") end
+  return (name:gsub("%-.*$", ""))
+end
+
+local function Clean(s)
+  s = tostring(s or "")
+  return (s:gsub("[~`%^;|\n\r]", " "))
+end
+
+------------------------------------------------------------------------
+-- Group helpers
+------------------------------------------------------------------------
+local function GroupMembers()
+  local set = {}
+  local me = Short(GetUnitName("player", true))
+  if IsInRaid and IsInRaid() then
+    for i = 1, 40 do
+      local n = GetUnitName("raid" .. i, true)
+      if n then set[Short(n)] = "raid" .. i end
+    end
+  else
+    for i = 1, 4 do
+      local n = GetUnitName("party" .. i, true)
+      if n then set[Short(n)] = "party" .. i end
+    end
+  end
+  set[me] = nil
+  return set
+end
+
+local function Channel()
+  if LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE)
+     and not IsInGroup(LE_PARTY_CATEGORY_HOME) then
+    return "INSTANCE_CHAT"
+  end
+  if IsInRaid and IsInRaid() then return "RAID" end
+  if IsInGroup and IsInGroup() then return "PARTY" end
+  return nil
+end
+
+local function ColorFor(name)
+  db.colors = db.colors or {}
+  local idx = db.colors[name]
+  if not idx then
+    local used = {}
+    for n in pairs(GroupMembers()) do if db.colors[n] then used[db.colors[n]] = true end end
+    for i = 1, #PALETTE do if not used[i] then idx = i; break end end
+    idx = idx or (math.random(#PALETTE))
+    db.colors[name] = idx
+  end
+  return PALETTE[idx]
+end
+
+local function Hex(c) return string.format("|cff%02x%02x%02x", c[1] * 255, c[2] * 255, c[3] * 255) end
+
+------------------------------------------------------------------------
+-- Reading my own quest log
+------------------------------------------------------------------------
+local function PlayerPos()
+  if not (C_Map and C_Map.GetBestMapForUnit) then return nil end
+  local m = C_Map.GetBestMapForUnit("player")
+  if not m then return nil end
+  local p = C_Map.GetPlayerMapPosition(m, "player")
+  if not p then return nil end
+  local x, y = p.x, p.y
+  if p.GetXY then x, y = p:GetXY() end
+  if not x or (x == 0 and y == 0) then return nil end
+  return m, x, y
+end
+
+local function ParseCount(text)
+  local have, need = tostring(text or ""):match("(%d+)%s*/%s*(%d+)")
+  return tonumber(have), tonumber(need)
+end
+
+local function Objectives(qid, logIndex)
+  local out = {}
+  if C_QuestLog and C_QuestLog.GetQuestObjectives then
+    local ok, objs = pcall(C_QuestLog.GetQuestObjectives, qid)
+    if ok and type(objs) == "table" and #objs > 0 then
+      for i, o in ipairs(objs) do
+        local have, need = o.numFulfilled, o.numRequired
+        if not need or need == 0 then
+          local h, n = ParseCount(o.text); have, need = h or have, n or need
+        end
+        out[i] = { text = o.text or "", have = have or 0, need = need or 0, done = o.finished and true or false, type = o.type }
+      end
+      return out
+    end
+  end
+  if logIndex and GetNumQuestLeaderBoards and GetQuestLogLeaderBoard then
+    local n = GetNumQuestLeaderBoards(logIndex) or 0
+    for j = 1, n do
+      local text, otype, finished = GetQuestLogLeaderBoard(j, logIndex)
+      local have, need = ParseCount(text)
+      out[j] = { text = text or "", have = have or 0, need = need or 0, done = finished and true or false, type = otype }
+    end
+  end
+  return out
+end
+
+-- Quest area points from the game's own map data (the same data the default map uses).
+local function QuestPOIs(qid, onMapCache)
+  local pts = {}
+  for mapID, list in pairs(onMapCache) do
+    for _, e in ipairs(list) do
+      if e.questID == qid and e.x and e.y and (e.x > 0 or e.y > 0) then
+        pts[#pts + 1] = { m = mapID, x = e.x, y = e.y }
+      end
+    end
+  end
+  if #pts == 0 and C_QuestLog and C_QuestLog.GetNextWaypoint then
+    local ok, m, x, y = pcall(C_QuestLog.GetNextWaypoint, qid)
+    if ok and m and x and y and (x > 0 or y > 0) then pts[1] = { m = m, x = x, y = y } end
+  end
+  return pts
+end
+
+local function BuildOnMapCache()
+  local cache = {}
+  if not (C_QuestLog and C_QuestLog.GetQuestsOnMap and C_Map) then return cache end
+  local maps = {}
+  local m = C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player")
+  if m then maps[m] = true end
+  -- Also zones I've recorded progress in, so quests in neighbouring zones still show.
+  for _, list in pairs(cdb.pins or {}) do
+    for _, p in ipairs(list) do maps[p.m] = true end
+  end
+  for mapID in pairs(maps) do
+    local ok, list = pcall(C_QuestLog.GetQuestsOnMap, mapID)
+    if ok and type(list) == "table" then cache[mapID] = list end
+  end
+  return cache
+end
+
+local function AddProgressPin(qid)
+  local m, x, y = PlayerPos()
+  if not m then return end
+  cdb.pins[qid] = cdb.pins[qid] or {}
+  local list = cdb.pins[qid]
+  for _, p in ipairs(list) do
+    if p.m == m and math.abs(p.x - x) < 0.01 and math.abs(p.y - y) < 0.01 then return end
+  end
+  table.insert(list, { m = m, x = x, y = y })
+  while #list > 6 do table.remove(list, 1) end
+end
+
+local function ScanLog()
+  local quests = {}
+  local onMap = BuildOnMapCache()
+  local function add(qid, title, level, complete, logIndex)
+    if not qid or qid == 0 then return end
+    local objs = Objectives(qid, logIndex)
+    quests[qid] = { id = qid, title = title or ("Quest " .. qid), level = level or 0,
+      complete = complete and true or false, objs = objs, pois = QuestPOIs(qid, onMap) }
+    -- progress pins: an objective count went up since last scan
+    local prev = mySnapshot[qid]
+    local snap = {}
+    for i, o in ipairs(objs) do
+      snap[i] = o.have
+      if scanned and prev and prev[i] and o.have > prev[i] then AddProgressPin(qid) end
+    end
+    mySnapshot[qid] = snap
+  end
+
+  if C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetInfo then
+    local n = C_QuestLog.GetNumQuestLogEntries() or 0
+    for i = 1, n do
+      local info = C_QuestLog.GetInfo(i)
+      if info and not info.isHeader and info.questID then
+        local complete = C_QuestLog.IsComplete and C_QuestLog.IsComplete(info.questID)
+        add(info.questID, info.title, info.level, complete, i)
+      end
+    end
+  elseif GetNumQuestLogEntries and GetQuestLogTitle then
+    local n = GetNumQuestLogEntries() or 0
+    for i = 1, n do
+      local title, level, _, isHeader, _, isComplete, _, qid = GetQuestLogTitle(i)
+      if title and not isHeader then add(qid, title, level, isComplete == 1 or isComplete == true, i) end
+    end
+  end
+
+  for qid in pairs(mySnapshot) do if not quests[qid] then mySnapshot[qid] = nil end end
+  for qid in pairs(cdb.pins) do if not quests[qid] then cdb.pins[qid] = nil end end
+  for _, q in pairs(quests) do q.pins = cdb.pins[q.id] or {} end
+  if scanned and db.alerts then
+    local members = GroupMembers()
+    for qid, q in pairs(quests) do
+      if not myQuests[qid] then
+        for who, fr in pairs(friends) do
+          if members[who] and fr.synced and fr.quests[qid] then Alert(who, q.title) end
+        end
+      end
+    end
+  end
+  myQuests = quests
+  scanned = true
+end
+
+------------------------------------------------------------------------
+-- Messaging (chunked + throttled)
+------------------------------------------------------------------------
+local sendQueue, sending, seq = {}, false, 0
+local CHUNK = 230
+
+local function RawSend(text, chan)
+  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+    C_ChatInfo.SendAddonMessage(PREFIX, text, chan)
+  elseif SendAddonMessage then
+    SendAddonMessage(PREFIX, text, chan)
+  end
+end
+
+local function Pump()
+  local item = table.remove(sendQueue, 1)
+  if not item then sending = false; return end
+  local chan = Channel()
+  if chan then RawSend(item, chan) end
+  C_Timer.After(0.2, Pump)
+end
+
+local function Send(msg)
+  if not Channel() then return end
+  seq = (seq % 999) + 1
+  local n = math.ceil(#msg / CHUNK)
+  if n < 1 then n = 1 end
+  for i = 1, n do
+    sendQueue[#sendQueue + 1] = seq .. ":" .. i .. ":" .. n .. ":" .. msg:sub((i - 1) * CHUNK + 1, i * CHUNK)
+  end
+  if not sending then sending = true; Pump() end
+end
+
+local function Num(v) return string.format("%.3f", v) end
+
+local function Encode(q)
+  local objs = {}
+  for i, o in ipairs(q.objs) do
+    objs[i] = Clean(o.text) .. FSEP .. (o.have or 0) .. FSEP .. (o.need or 0) .. FSEP .. (o.done and 1 or 0) .. FSEP .. Clean(o.type or "")
+  end
+  local pois, pins = {}, {}
+  for i, p in ipairs(q.pois) do pois[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
+  for i, p in ipairs(q.pins or {}) do pins[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
+  return table.concat({ "Q", q.id, q.level or 0, q.complete and 1 or 0, Clean(q.title),
+    table.concat(objs, OSEP), table.concat(pois, PSEP), table.concat(pins, PSEP) }, SEP)
+end
+
+local function Broadcast(force)
+  if not Channel() then return end
+  ScanLog()
+  if force then wipe(lastSent) end
+  local ids = {}
+  for qid, q in pairs(myQuests) do
+    ids[#ids + 1] = qid
+    local payload = Encode(q)
+    if lastSent[qid] ~= payload then lastSent[qid] = payload; Send(payload) end
+  end
+  for qid in pairs(lastSent) do if not myQuests[qid] then lastSent[qid] = nil end end
+  Send("S" .. SEP .. table.concat(ids, ","))
+end
+
+local pendingBroadcast, pendingForce = false, false
+local function ScheduleBroadcast(force, delay)
+  if force then pendingForce = true end
+  if pendingBroadcast then return end
+  pendingBroadcast = true
+  C_Timer.After(delay or 1.5, function()
+    pendingBroadcast = false
+    local f = pendingForce; pendingForce = false
+    Broadcast(f)
+  end)
+end
+
+local function Split(s, sep)
+  local out = {}
+  if s == nil or s == "" then return out end
+  local start = 1
+  while true do
+    local i = s:find(sep, start, true)
+    if not i then out[#out + 1] = s:sub(start); break end
+    out[#out + 1] = s:sub(start, i - 1)
+    start = i + #sep
+  end
+  return out
+end
+
+local function DecodePoints(s)
+  local out = {}
+  for _, part in ipairs(Split(s, PSEP)) do
+    local m, x, y = part:match("^(%d+),([%d%.]+),([%d%.]+)$")
+    if m then out[#out + 1] = { m = tonumber(m), x = tonumber(x), y = tonumber(y) } end
+  end
+  return out
+end
+
+local RefreshAll -- forward
+
+Alert = function(who, title)
+  if not db.alerts then return end
+  local c = ColorFor(who)
+  local text = Hex(c) .. who .. "|r is on the same quest: |cffffd100" .. title .. "|r"
+  Print(text)
+  if RaidNotice_AddMessage and RaidWarningFrame then
+    pcall(RaidNotice_AddMessage, RaidWarningFrame, text, ChatTypeInfo and ChatTypeInfo["RAID_WARNING"] or { r = 1, g = 1, b = 1 })
+  end
+  local kit = SOUNDKIT and (SOUNDKIT.READY_CHECK or SOUNDKIT.RAID_WARNING)
+  if not (kit and pcall(PlaySound, kit, "Master")) then pcall(PlaySound, 8960, "Master") end
+end
+
+local function Handle(sender, msg)
+  local f = Split(msg, SEP)
+  local kind = f[1]
+  if kind == "H" then
+    ScheduleBroadcast(true, 1 + math.random() * 2)
+    return
+  end
+  local fr = friends[sender] or { quests = {} }
+  friends[sender] = fr
+  fr.last = GetTime()
+  if kind == "Q" then
+    local qid = tonumber(f[2]); if not qid then return end
+    local objs = {}
+    for _, o in ipairs(Split(f[6], OSEP)) do
+      local p = Split(o, FSEP)
+      objs[#objs + 1] = { text = p[1] or "", have = tonumber(p[2]) or 0, need = tonumber(p[3]) or 0, done = p[4] == "1", type = p[5] }
+    end
+    if fr.synced and not fr.quests[qid] and myQuests[qid] then Alert(sender, f[5] or "?") end
+    local prev = fr.quests[qid]
+    if fr.synced and prev and db.itemAlerts then
+      for i, o in ipairs(objs) do
+        local old = prev.objs[i]
+        local isItem = (o.type == "item") or (o.type == nil or o.type == "")
+        if isItem and old and o.have > old.have then
+          Print(Hex(ColorFor(sender)) .. sender .. "|r looted " .. o.text
+            .. (o.done and " |cff4dff4d(done)|r" or "") .. " |cffaaaaaa- " .. (f[5] or "?") .. "|r")
+        end
+      end
+    end
+    fr.quests[qid] = { id = qid, level = tonumber(f[3]) or 0, complete = f[4] == "1", title = f[5] or "?",
+      objs = objs, pois = DecodePoints(f[7]), pins = DecodePoints(f[8]) }
+  elseif kind == "S" then
+    local keep = {}
+    for _, id in ipairs(Split(f[2], ",")) do keep[tonumber(id) or 0] = true end
+    for qid in pairs(fr.quests) do if not keep[qid] then fr.quests[qid] = nil end end
+    fr.synced = true
+  end
+  RefreshAll()
+end
+
+local inbox = {}
+local function OnAddonMessage(prefix, text, _, sender)
+  if prefix ~= PREFIX then return end
+  sender = Short(sender)
+  if not sender or sender == Short(GetUnitName("player", true)) then return end
+  if not GroupMembers()[sender] then return end
+  local id, i, n, body = text:match("^(%d+):(%d+):(%d+):(.*)$")
+  if not id then return end
+  i, n = tonumber(i), tonumber(n)
+  local key = sender .. "#" .. id
+  local buf = inbox[key]
+  if not buf then buf = { n = n, parts = {}, got = 0, t = GetTime() }; inbox[key] = buf end
+  if not buf.parts[i] then buf.parts[i] = body; buf.got = buf.got + 1 end
+  if buf.got >= buf.n then
+    inbox[key] = nil
+    Handle(sender, table.concat(buf.parts))
+  end
+  for k, b in pairs(inbox) do if GetTime() - b.t > 30 then inbox[k] = nil end end
+end
+
+------------------------------------------------------------------------
+-- World map pins (same method as TrekTime, which works in WoW Forever)
+------------------------------------------------------------------------
+local pins = {}
+
+local function Project(m, x, y, viewMap)
+  if m == viewMap then return x, y end
+  if not (C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D) then return nil end
+  local ok, contID, world = pcall(C_Map.GetWorldPosFromMapPos, m, CreateVector2D(x, y))
+  if not ok or not world then return nil end
+  local ok2, _, pos = pcall(C_Map.GetMapPosFromWorldPos, contID, world, viewMap)
+  if not ok2 or not pos then return nil end
+  local px, py = pos.x, pos.y
+  if pos.GetXY then px, py = pos:GetXY() end
+  if not px or px < 0 or px > 1 or py < 0 or py > 1 then return nil end
+  return px, py
+end
+
+local function ShowPinTooltip(p)
+  GameTooltip:SetOwner(p, "ANCHOR_RIGHT")
+  local c = ColorFor(p.who)
+  GameTooltip:AddLine(p.who, c[1], c[2], c[3])
+  for idx, q in ipairs(p.list) do
+    if idx > 1 then GameTooltip:AddLine(" ") end
+    GameTooltip:AddLine(string.format("[%d] %s", q.level or 0, q.title), 1, 1, 1)
+    if myQuests[q.id] then GameTooltip:AddLine("You have this quest too", GOLD[1], GOLD[2], GOLD[3]) end
+    if q.complete then
+      GameTooltip:AddLine("Ready to turn in", 0.3, 1, 0.3)
+    else
+      for _, o in ipairs(q.objs) do
+        local col = o.done and 0.5 or 0.9
+        GameTooltip:AddLine("  " .. o.text, col, col, col)
+      end
+    end
+  end
+  if p.isProgress then GameTooltip:AddLine("Spot where they made progress", 0.6, 0.6, 0.6) end
+  GameTooltip:Show()
+end
+
+local function GetPin(i, parent)
+  local p = pins[i]
+  if not p then
+    p = CreateFrame("Button", nil, parent)
+    p.ring = p:CreateTexture(nil, "ARTWORK", nil, 1)
+    p.ring:SetTexture(MEDIA .. "Ring"); p.ring:SetPoint("CENTER"); p.ring:SetVertexColor(GOLD[1], GOLD[2], GOLD[3])
+    p.disc = p:CreateTexture(nil, "ARTWORK", nil, 2)
+    p.disc:SetTexture(MEDIA .. "Disc"); p.disc:SetAllPoints()
+    p.txt = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    p.txt:SetPoint("CENTER", 0, 0); p.txt:SetTextColor(0, 0, 0); p.txt:SetShadowColor(0, 0, 0, 0)
+    p:SetScript("OnEnter", ShowPinTooltip)
+    p:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    pins[i] = p
+  end
+  return p
+end
+
+local function RefreshPins()
+  for _, p in ipairs(pins) do p:Hide() end
+  if not db or not db.mapPins or not WorldMapFrame or not WorldMapFrame:IsShown() then return end
+  local viewMap = WorldMapFrame:GetMapID()
+  local child = WorldMapFrame.ScrollContainer and WorldMapFrame.ScrollContainer.Child
+  if not viewMap or not child then return end
+  local w, h = child:GetWidth(), child:GetHeight()
+  local members = GroupMembers()
+  local i = 0
+  local function place(who, list, x, y, isProgress)
+    i = i + 1
+    local p = GetPin(i, child)
+    p.who, p.list, p.isProgress = who, list, isProgress
+    local c = ColorFor(who)
+    local size = isProgress and 12 or 20
+    p:SetSize(size, size)
+    p.ring:SetSize(size * 1.7, size * 1.7)
+    p.disc:SetVertexColor(c[1], c[2], c[3])
+    local shared = false
+    for _, q in ipairs(list) do if myQuests[q.id] then shared = true end end
+    p.ring:SetShown(shared and db.highlightShared ~= false)
+    local allDone = true
+    for _, q in ipairs(list) do if not q.complete then allDone = false end end
+    if isProgress then p.txt:SetText("")
+    elseif allDone then p.txt:SetText("?")
+    else p.txt:SetText(who:sub(1, 1):upper()) end
+    p:SetFrameLevel(child:GetFrameLevel() + 2100)
+    p:ClearAllPoints()
+    p:SetPoint("CENTER", child, "TOPLEFT", x * w, -y * h)
+    p:Show()
+  end
+  for who, fr in pairs(friends) do
+    if members[who] then
+      -- group quest areas that land on the same spot into one pin
+      local spots = {}
+      local prog = {}
+      for _, q in pairs(fr.quests) do
+        for _, pt in ipairs(q.pois) do
+          local x, y = Project(pt.m, pt.x, pt.y, viewMap)
+          if x then
+            local merged
+            for _, s in ipairs(spots) do
+              if math.abs((s.x - x) * w) < 12 and math.abs((s.y - y) * h) < 12 then
+                s.list[#s.list + 1] = q; merged = true; break
+              end
+            end
+            if not merged then spots[#spots + 1] = { x = x, y = y, list = { q } } end
+          end
+        end
+        if db.progressPins ~= false and not q.complete then
+          for _, pt in ipairs(q.pins or {}) do
+            local x, y = Project(pt.m, pt.x, pt.y, viewMap)
+            if x then prog[#prog + 1] = { x = x, y = y, list = { q } } end
+          end
+        end
+      end
+      for _, s in ipairs(prog) do place(who, s.list, s.x, s.y, true) end
+      for _, s in ipairs(spots) do place(who, s.list, s.x, s.y, false) end
+    end
+  end
+end
+
+------------------------------------------------------------------------
+-- Shared row builder (used by the side panel and the floating list)
+------------------------------------------------------------------------
+local collapsed = {}
+
+local function BuildRows()
+  local rows, members = {}, GroupMembers()
+  local names = {}
+  for who in pairs(friends) do if members[who] then names[#names + 1] = who end end
+  table.sort(names)
+  for _, who in ipairs(names) do
+    local fr = friends[who]
+    local qs = {}
+    for _, q in pairs(fr.quests) do qs[#qs + 1] = q end
+    table.sort(qs, function(a, b)
+      local sa, sb = myQuests[a.id] and 1 or 0, myQuests[b.id] and 1 or 0
+      if sa ~= sb then return sa > sb end
+      if a.level ~= b.level then return a.level < b.level end
+      return a.title < b.title
+    end)
+    rows[#rows + 1] = { kind = "header", who = who, count = #qs }
+    if not collapsed[who] then
+      if #qs == 0 then rows[#rows + 1] = { kind = "note", text = "No quests" } end
+      for _, q in ipairs(qs) do
+        local prog = {}
+        for _, o in ipairs(q.objs) do if o.need and o.need > 0 then prog[#prog + 1] = o.have .. "/" .. o.need end end
+        local status = q.complete and " |cff4dff4d(done)|r" or (#prog > 0 and (" |cffaaaaaa" .. table.concat(prog, " ") .. "|r") or "")
+        local shared = myQuests[q.id] and db.highlightShared ~= false
+        local name = shared and ("|cffffd100* " .. q.title .. "|r") or ("|cffffffff" .. q.title .. "|r")
+        rows[#rows + 1] = { kind = "quest", q = q, who = who,
+          text = string.format("|cffaaaaaa[%d]|r %s%s", q.level or 0, name, status) }
+      end
+    end
+  end
+  return rows, #names
+end
+
+local function QuestTooltip(owner, q, who)
+  GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+  local c = ColorFor(who)
+  GameTooltip:AddLine(string.format("[%d] %s", q.level or 0, q.title), 1, 0.82, 0)
+  GameTooltip:AddLine(who, c[1], c[2], c[3])
+  if myQuests[q.id] then GameTooltip:AddLine("You have this quest too", GOLD[1], GOLD[2], GOLD[3]) end
+  if q.complete then GameTooltip:AddLine("Ready to turn in", 0.3, 1, 0.3)
+  else for _, o in ipairs(q.objs) do GameTooltip:AddLine("  " .. o.text, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9) end end
+  GameTooltip:Show()
+end
+
+local RefreshList -- forward
+
+------------------------------------------------------------------------
+-- Side panel attached to the Map & Quest Log, opened by a tab button
+------------------------------------------------------------------------
+local panel, tab, scroll, content
+local panelRows = {}
+
+local function MakePanel()
+  if panel or not WorldMapFrame then return end
+  local ok, f = pcall(CreateFrame, "Frame", "QuestMatesPanel", WorldMapFrame, "ButtonFrameTemplate")
+  if not ok or not f then
+    f = CreateFrame("Frame", "QuestMatesPanel", WorldMapFrame, BackdropTemplateMixin and "BackdropTemplate" or nil)
+    if f.SetBackdrop then
+      f:SetBackdrop({ bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border", tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 8, right = 8, top = 8, bottom = 8 } })
+    end
+    local t = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    t:SetPoint("TOP", 0, -14); t:SetText("QuestMates")
+    local x = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    x:SetPoint("TOPRIGHT", -4, -4); f.CloseButton = x
+  else
+    if ButtonFrameTemplate_HidePortrait then pcall(ButtonFrameTemplate_HidePortrait, f) end
+    if ButtonFrameTemplate_HideButtonBar then pcall(ButtonFrameTemplate_HideButtonBar, f) end
+    if f.SetTitle then f:SetTitle("QuestMates")
+    elseif f.TitleText then f.TitleText:SetText("QuestMates")
+    elseif f.TitleContainer and f.TitleContainer.TitleText then f.TitleContainer.TitleText:SetText("QuestMates") end
+  end
+  f:SetWidth(320)
+  f:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -2, 0)
+  f:SetPoint("BOTTOMLEFT", WorldMapFrame, "BOTTOMRIGHT", -2, 0)
+  f:SetFrameStrata(WorldMapFrame:GetFrameStrata())
+  f:EnableMouse(true)
+  f:Hide()
+  if f.CloseButton then
+    f.CloseButton:SetScript("OnClick", function() db.panelOpen = false; f:Hide(); RefreshList() end)
+  end
+  local area = f.Inset or f
+  local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+  sf:SetPoint("TOPLEFT", area, "TOPLEFT", f.Inset and 6 or 14, f.Inset and -6 or -36)
+  sf:SetPoint("BOTTOMRIGHT", area, "BOTTOMRIGHT", f.Inset and -30 or -36, f.Inset and 6 or 14)
+  local c = CreateFrame("Frame", nil, sf)
+  c:SetSize(240, 10)
+  sf:SetScrollChild(c)
+  scroll, content, panel = sf, c, f
+
+  -- side tab, like the map's other edge buttons
+  local b = CreateFrame("Button", "QuestMatesTab", WorldMapFrame)
+  b:SetSize(34, 44)
+  b:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -4, -70)
+  b.Reanchor = function(self)
+    self:ClearAllPoints()
+    if panel and panel:IsShown() then
+      self:SetPoint("TOPLEFT", panel, "TOPRIGHT", -2, -70)
+    else
+      self:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -4, -70)
+    end
+  end
+  b:SetFrameStrata(WorldMapFrame:GetFrameStrata())
+  b:SetFrameLevel(WorldMapFrame:GetFrameLevel() + 20)
+  local bg = b:CreateTexture(nil, "BACKGROUND")
+  bg:SetTexture("Interface\\Buttons\\WHITE8X8"); bg:SetVertexColor(0.12, 0.08, 0.04, 0.95); bg:SetAllPoints()
+  local edge = b:CreateTexture(nil, "BORDER")
+  edge:SetTexture("Interface\\Buttons\\WHITE8X8"); edge:SetVertexColor(0.75, 0.6, 0.3, 1)
+  edge:SetPoint("TOPLEFT", -1, 1); edge:SetPoint("BOTTOMRIGHT", 1, -1)
+  edge:SetDrawLayer("BACKGROUND", -1)
+  local icon = b:CreateTexture(nil, "ARTWORK")
+  icon:SetTexture(MEDIA .. "PartyIcon")
+  icon:SetTexCoord(0, 1, 0, 1)
+  icon:SetPoint("TOPLEFT", 1, -1); icon:SetPoint("BOTTOMRIGHT", -1, 1)
+  b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+  b.badge = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+  b.badge:SetPoint("BOTTOMRIGHT", -2, 2)
+  b:SetScript("OnClick", function()
+    db.panelOpen = not db.panelOpen
+    RefreshList()
+  end)
+  b:SetScript("OnEnter", function(s)
+    GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("QuestMates")
+    GameTooltip:AddLine("Your group's quests", 1, 1, 1)
+    GameTooltip:Show()
+  end)
+  b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  tab = b
+end
+
+local function PanelRow(i)
+  local r = panelRows[i]
+  if r then return r end
+  r = CreateFrame("Button", nil, content)
+  r:SetHeight(20)
+  r.bar = r:CreateTexture(nil, "BACKGROUND")
+  r.bar:SetAllPoints(); r.bar:SetTexture("Interface\\Buttons\\WHITE8X8")
+  r.line = r:CreateTexture(nil, "BORDER")
+  r.line:SetTexture("Interface\\Buttons\\WHITE8X8"); r.line:SetVertexColor(0.55, 0.42, 0.2, 1)
+  r.line:SetPoint("BOTTOMLEFT"); r.line:SetPoint("BOTTOMRIGHT"); r.line:SetHeight(1)
+  r.dot = r:CreateTexture(nil, "ARTWORK")
+  r.dot:SetTexture(MEDIA .. "Disc"); r.dot:SetSize(12, 12); r.dot:SetPoint("LEFT", 6, 0)
+  r.text = r:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  r.text:SetJustifyH("LEFT"); r.text:SetWordWrap(false)
+  r.sign = r:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  r.sign:SetPoint("RIGHT", -6, 0)
+  r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+  r:SetScript("OnClick", function(s)
+    if s.data and s.data.kind == "header" then collapsed[s.data.who] = not collapsed[s.data.who]; RefreshList() end
+  end)
+  r:SetScript("OnEnter", function(s)
+    if s.data and s.data.kind == "quest" then QuestTooltip(s, s.data.q, s.data.who) end
+  end)
+  r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  panelRows[i] = r
+  return r
+end
+
+local function RefreshPanel()
+  if not panel then return end
+  local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
+  tab:SetShown(mapOpen and db.dock ~= false)
+  local rows, nFriends = BuildRows()
+  tab.badge:SetText(nFriends > 0 and nFriends or "")
+  if not (mapOpen and db.panelOpen and db.dock ~= false) then panel:Hide(); tab:Reanchor(); return end
+  panel:Show()
+  tab:Reanchor()
+  local w = scroll:GetWidth()
+  if not w or w < 50 then
+    w = 250
+    C_Timer.After(0, function() if scroll:GetWidth() and scroll:GetWidth() >= 50 then RefreshPanel() end end)
+  end
+  content:SetWidth(w)
+  for _, r in ipairs(panelRows) do r:Hide() end
+  local y = 0
+  if #rows == 0 then
+    local r = PanelRow(1); r.data = nil
+    r:ClearAllPoints(); r:SetPoint("TOPLEFT", 0, -4); r:SetPoint("RIGHT", content, "RIGHT")
+    r.bar:SetVertexColor(0, 0, 0, 0); r.line:Hide(); r.dot:Hide(); r.sign:SetText("")
+    r.text:SetFontObject("GameFontDisableSmall")
+    r.text:ClearAllPoints(); r.text:SetPoint("LEFT", 4, 0); r.text:SetPoint("RIGHT", -4, 0)
+    r.text:SetText(IsInGroup() and "No one in your group has QuestMates yet." or "Join a group to see their quests.")
+    r:Show()
+    content:SetHeight(30)
+    return
+  end
+  for i, d in ipairs(rows) do
+    local r = PanelRow(i)
+    r.data = d
+    r:ClearAllPoints()
+    r.text:ClearAllPoints()
+    if d.kind == "header" then
+      r:SetHeight(24)
+      r:SetPoint("TOPLEFT", 0, -y - (i > 1 and 6 or 0)); r:SetPoint("RIGHT", content, "RIGHT")
+      y = y + 24 + (i > 1 and 6 or 0)
+      r.bar:SetVertexColor(0.24, 0.15, 0.07, 0.95); r.line:Show()
+      local c = ColorFor(d.who)
+      r.dot:Show(); r.dot:SetVertexColor(c[1], c[2], c[3])
+      r.text:SetFontObject("GameFontNormal")
+      r.text:SetPoint("LEFT", 24, 0); r.text:SetPoint("RIGHT", -24, 0)
+      r.text:SetText(d.who .. " |cffaaaaaa(" .. d.count .. ")|r")
+      r.sign:SetText(collapsed[d.who] and "|cffffd100+|r" or "|cffffd100-|r")
+    else
+      r:SetHeight(18)
+      r:SetPoint("TOPLEFT", 0, -y - 2); r:SetPoint("RIGHT", content, "RIGHT")
+      y = y + 20
+      r.bar:SetVertexColor(0, 0, 0, 0); r.line:Hide(); r.dot:Hide(); r.sign:SetText("")
+      r.text:SetFontObject(d.kind == "note" and "GameFontDisableSmall" or "GameFontHighlight")
+      r.text:SetPoint("LEFT", 12, 0); r.text:SetPoint("RIGHT", -4, 0)
+      r.text:SetText(d.text)
+    end
+    r:Show()
+  end
+  content:SetHeight(y + 8)
+end
+
+------------------------------------------------------------------------
+-- Floating list (for when the map is closed)
+------------------------------------------------------------------------
+local list = CreateFrame("Frame", "QuestMatesList", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+list:SetSize(380, 60)
+list:SetMovable(true); list:EnableMouse(true); list:RegisterForDrag("LeftButton")
+list:SetClampedToScreen(true)
+list:SetScript("OnDragStart", list.StartMoving)
+list:SetScript("OnDragStop", function(s)
+  s:StopMovingOrSizing()
+  local a, _, b, x, y = s:GetPoint()
+  db.pos = { a, b, x, y }
+end)
+if list.SetBackdrop then
+  list:SetBackdrop({ bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 14, tile = true, tileSize = 32,
+    insets = { left = 3, right = 3, top = 3, bottom = 3 } })
+  list:SetBackdropBorderColor(0.75, 0.6, 0.3, 1)
+end
+list:Hide()
+local title = list:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+title:SetPoint("TOPLEFT", 10, -9); title:SetText("QuestMates")
+local close = CreateFrame("Button", nil, list, "UIPanelCloseButton")
+close:SetPoint("TOPRIGHT", 2, 2)
+close:SetScript("OnClick", function() db.listShown = false; list:Hide() end)
+local lines = {}
+
+local function PlaceList()
+  list:ClearAllPoints()
+  if db.pos then list:SetPoint(db.pos[1], UIParent, db.pos[2], db.pos[3], db.pos[4])
+  else list:SetPoint("RIGHT", UIParent, "RIGHT", -40, 80) end
+  list:SetScale(db.scale or 1.15)
+end
+
+local function RefreshFloating()
+  for _, l in ipairs(lines) do l:Hide() end
+  local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
+  local rows, nFriends = BuildRows()
+  if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); return end
+  list:SetScale(db.scale or 1.15)
+  local y, n = -32, 0
+  local function line(text, indent)
+    n = n + 1
+    local l = lines[n]
+    if not l then
+      l = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+      l:SetJustifyH("LEFT"); l:SetWordWrap(false)
+      lines[n] = l
+    end
+    l:ClearAllPoints()
+    l:SetPoint("TOPLEFT", 10 + (indent or 0), y)
+    l:SetPoint("RIGHT", list, "RIGHT", -10, 0)
+    l:SetText(text); l:Show()
+    y = y - 18
+  end
+  for i, d in ipairs(rows) do
+    if d.kind == "header" then
+      if i > 1 then y = y - 6 end
+      line(Hex(ColorFor(d.who)) .. d.who .. "|r" .. (collapsed[d.who] and " |cffaaaaaa(" .. d.count .. ")|r" or ""))
+    elseif d.kind == "note" then line("|cff888888" .. d.text .. "|r", 14)
+    else line(d.text, 14) end
+  end
+  list:SetHeight(-y + 8)
+  list:Show()
+end
+
+RefreshList = function()
+  if not db then return end
+  RefreshPanel()
+  RefreshFloating()
+end
+
+RefreshAll = function()
+  RefreshPins()
+  RefreshList()
+end
+
+------------------------------------------------------------------------
+-- Events
+------------------------------------------------------------------------
+local function PruneFriends()
+  local members = GroupMembers()
+  for who in pairs(friends) do if not members[who] then friends[who] = nil end end
+end
+
+local ev = CreateFrame("Frame")
+ev:RegisterEvent("ADDON_LOADED")
+ev:RegisterEvent("PLAYER_ENTERING_WORLD")
+ev:RegisterEvent("GROUP_ROSTER_UPDATE")
+ev:RegisterEvent("QUEST_LOG_UPDATE")
+ev:RegisterEvent("UNIT_QUEST_LOG_CHANGED")
+ev:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+ev:RegisterEvent("CHAT_MSG_ADDON")
+
+local lastGroupSize = 0
+ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
+  if e == "ADDON_LOADED" and a1 == ADDON then
+    QuestMatesDB = QuestMatesDB or {}
+    QuestMatesCharDB = QuestMatesCharDB or {}
+    db, cdb = QuestMatesDB, QuestMatesCharDB
+    if db.mapPins == nil then db.mapPins = true end
+    if db.listShown == nil then db.listShown = true end
+    if db.highlightShared == nil then db.highlightShared = true end
+    if db.progressPins == nil then db.progressPins = true end
+    if db.alerts == nil then db.alerts = true end
+    if db.itemAlerts == nil then db.itemAlerts = true end
+    db.colors = db.colors or {}
+    cdb.pins = cdb.pins or {}
+    if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+      C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
+    elseif RegisterAddonMessagePrefix then
+      RegisterAddonMessagePrefix(PREFIX)
+    end
+    PlaceList()
+    if WorldMapFrame then
+      MakePanel()
+      WorldMapFrame:HookScript("OnShow", function() C_Timer.After(0, RefreshList) end)
+      WorldMapFrame:HookScript("OnHide", function() C_Timer.After(0, RefreshList) end)
+      WorldMapFrame:HookScript("OnShow", RefreshPins)
+      if WorldMapFrame.OnMapChanged then hooksecurefunc(WorldMapFrame, "OnMapChanged", RefreshPins) end
+      WorldMapFrame:HookScript("OnSizeChanged", function() C_Timer.After(0, RefreshPins) end)
+      if WorldMapFrame.Maximize then hooksecurefunc(WorldMapFrame, "Maximize", RefreshPins) end
+      if WorldMapFrame.Minimize then hooksecurefunc(WorldMapFrame, "Minimize", RefreshPins) end
+    end
+  elseif not db then
+    return
+  elseif e == "PLAYER_ENTERING_WORLD" then
+    ScanLog()
+    if Channel() then Send("H"); ScheduleBroadcast(true, 3) end
+  elseif e == "GROUP_ROSTER_UPDATE" then
+    PruneFriends()
+    local size = GetNumGroupMembers and GetNumGroupMembers() or 0
+    if size > lastGroupSize and Channel() then
+      Send("H")              -- ask everyone (incl. newcomers) for their quests
+      ScheduleBroadcast(true, 2)
+    end
+    lastGroupSize = size
+    RefreshAll()
+  elseif e == "QUEST_LOG_UPDATE" or (e == "UNIT_QUEST_LOG_CHANGED" and a1 == "player") then
+    ScheduleBroadcast(false, 1.5)
+    C_Timer.After(1.6, RefreshAll) -- shared-quest highlights follow my own log
+  elseif e == "ZONE_CHANGED_NEW_AREA" then
+    ScheduleBroadcast(false, 2)
+  elseif e == "CHAT_MSG_ADDON" then
+    OnAddonMessage(a1, a2, a3, a4)
+  end
+end)
+
+------------------------------------------------------------------------
+-- Slash commands
+------------------------------------------------------------------------
+SLASH_QUESTMATES1 = "/qm"
+SLASH_QUESTMATES2 = "/questmates"
+SlashCmdList.QUESTMATES = function(msg)
+  msg = (msg or ""):lower():match("^%s*(.-)%s*$")
+  if msg == "" then
+    db.listShown = not db.listShown
+    if db.listShown and not list:IsShown() then
+      local any = false
+      for who in pairs(friends) do if GroupMembers()[who] then any = true end end
+      if not any then Print("No QuestMates data yet. Your group members need QuestMates installed too.") end
+    end
+    RefreshList()
+  elseif msg == "map" then
+    db.mapPins = not db.mapPins; RefreshPins()
+    Print("Map markers " .. (db.mapPins and "on" or "off"))
+  elseif msg == "shared" then
+    db.highlightShared = not db.highlightShared; RefreshAll()
+    Print("Shared quest highlight " .. (db.highlightShared and "on" or "off"))
+  elseif msg == "progress" then
+    db.progressPins = not db.progressPins; RefreshPins()
+    Print("Progress spots " .. (db.progressPins and "on" or "off"))
+  elseif msg == "alert" then
+    db.alerts = not db.alerts
+    Print("Same-quest alerts " .. (db.alerts and "on" or "off"))
+  elseif msg == "items" then
+    db.itemAlerts = not db.itemAlerts
+    Print("Friend quest item messages " .. (db.itemAlerts and "on" or "off"))
+  elseif msg == "dock" then
+    db.dock = (db.dock == false); RefreshList()
+    Print("Map tab and side panel " .. (db.dock ~= false and "on" or "off"))
+  elseif msg:match("^scale") then
+    local v = tonumber(msg:match("^scale%s+([%d%.]+)"))
+    if v and v >= 0.5 and v <= 2.5 then db.scale = v; RefreshList(); Print("Size set to " .. v)
+    else Print("Use /qm scale 0.5 - 2.5 (now " .. (db.scale or 1.15) .. ")") end
+  elseif msg == "sync" then
+    if not Channel() then Print("You're not in a group.") return end
+    Send("H"); ScheduleBroadcast(true, 0.5); Print("Asking your group for their quests...")
+  elseif msg == "debug" then
+    ScanLog()
+    local nq, npoi, npin = 0, 0, 0
+    for _, q in pairs(myQuests) do
+      nq = nq + 1; npoi = npoi + #q.pois; npin = npin + #(q.pins or {})
+    end
+    Print(string.format("My quests: %d, quest-area points found: %d, progress spots: %d", nq, npoi, npin))
+    Print("APIs: GetQuestsOnMap=" .. tostring(C_QuestLog and C_QuestLog.GetQuestsOnMap ~= nil)
+      .. " GetNextWaypoint=" .. tostring(C_QuestLog and C_QuestLog.GetNextWaypoint ~= nil)
+      .. " GetQuestObjectives=" .. tostring(C_QuestLog and C_QuestLog.GetQuestObjectives ~= nil))
+    Print("Group channel: " .. tostring(Channel()))
+    Print("Side panel: " .. (panel and "ready" or "not created") .. ", template: " .. tostring(panel and panel.Inset ~= nil and "Blizzard" or "fallback"))
+    for who, fr in pairs(friends) do
+      local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
+      Print(string.format("  %s: %d quests received", who, c))
+    end
+  elseif msg == "clear" then
+    wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
+  else
+    Print("/qm - show/hide the floating list (or click the tab on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm dock (map tab on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+  end
+end

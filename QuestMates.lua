@@ -557,6 +557,7 @@ local function QuestTooltip(owner, q, who)
   local c = ColorFor(who)
   GameTooltip:AddLine(string.format("[%d] %s", q.level or 0, q.title), 1, 0.82, 0)
   GameTooltip:AddLine(who, c[1], c[2], c[3])
+  GameTooltip:AddLine("Click to read the quest - Shift-click to link it", 0.5, 0.8, 1)
   if myQuests[q.id] then GameTooltip:AddLine("You have this quest too", GOLD[1], GOLD[2], GOLD[3]) end
   if q.complete then GameTooltip:AddLine("Ready to turn in", 0.3, 1, 0.3)
   else for _, o in ipairs(q.objs) do GameTooltip:AddLine("  " .. o.text, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9) end end
@@ -564,6 +565,40 @@ local function QuestTooltip(owner, q, who)
 end
 
 local RefreshList -- forward
+
+-- Click a friend's quest: read it. Shift-click: link it in chat.
+local function QuestLink(q)
+  local link = GetQuestLink and GetQuestLink(q.id)
+  return link or string.format("|cffffff00|Hquest:%d:%d|h[%s]|h|r", q.id, q.level or 0, q.title)
+end
+
+local function OpenQuest(q, who)
+  if IsModifiedClick and IsModifiedClick("CHATLINK") and ChatEdit_InsertLink then
+    if ChatEdit_InsertLink(QuestLink(q)) then return end
+  end
+  if myQuests[q.id] and not IsShiftKeyDown() then
+    if QuestMapFrame_OpenToQuestDetails then QuestMapFrame_OpenToQuestDetails(q.id) return end
+    if QuestLog_OpenToQuestIndex and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
+      local idx = C_QuestLog.GetLogIndexForQuestID(q.id)
+      if idx then QuestLog_OpenToQuestIndex(idx) return end
+    end
+  end
+  local tt = ItemRefTooltip
+  if not tt then return end
+  if tt:IsShown() and tt.qmQuest == q.id then tt:Hide(); tt.qmQuest = nil; return end
+  ShowUIPanel(tt)
+  if not tt:IsShown() then tt:SetOwner(UIParent, "ANCHOR_PRESERVE") end
+  tt:SetHyperlink("quest:" .. q.id .. ":" .. (q.level or 0))
+  if tt:NumLines() == 0 then tt:AddLine(string.format("[%d] %s", q.level or 0, q.title), 1, 0.82, 0) end
+  local c = ColorFor(who)
+  tt:AddLine(" ")
+  tt:AddLine(who .. (q.complete and " - ready to turn in" or "'s progress:"), c[1], c[2], c[3])
+  if not q.complete then
+    for _, o in ipairs(q.objs) do tt:AddLine("  " .. o.text, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9) end
+  end
+  tt:Show()
+  tt.qmQuest = q.id
+end
 
 ------------------------------------------------------------------------
 -- Side panel attached to the Map & Quest Log, opened by a tab button
@@ -669,7 +704,8 @@ local function PanelRow(i)
   r.sign:SetPoint("RIGHT", -6, 0)
   r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
   r:SetScript("OnClick", function(s)
-    if s.data and s.data.kind == "header" then collapsed[s.data.who] = not collapsed[s.data.who]; RefreshList() end
+    if s.data and s.data.kind == "header" then collapsed[s.data.who] = not collapsed[s.data.who]; RefreshList()
+    elseif s.data and s.data.kind == "quest" then OpenQuest(s.data.q, s.data.who) end
   end)
   r:SetScript("OnEnter", function(s)
     if s.data and s.data.kind == "quest" then QuestTooltip(s, s.data.q, s.data.who) end
@@ -778,26 +814,37 @@ local function RefreshFloating()
   if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); return end
   list:SetScale(db.scale or 1.15)
   local y, n = -32, 0
-  local function line(text, indent)
+  local function line(text, indent, data)
     n = n + 1
     local l = lines[n]
     if not l then
-      l = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-      l:SetJustifyH("LEFT"); l:SetWordWrap(false)
+      l = CreateFrame("Button", nil, list)
+      l:SetHeight(18)
+      l.fs = l:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+      l.fs:SetAllPoints(); l.fs:SetJustifyH("LEFT"); l.fs:SetWordWrap(false)
+      l:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+      l:SetScript("OnClick", function(b)
+        local d = b.data; if not d then return end
+        if d.kind == "header" then collapsed[d.who] = not collapsed[d.who]; RefreshList()
+        elseif d.kind == "quest" then OpenQuest(d.q, d.who) end
+      end)
+      l:SetScript("OnEnter", function(b) if b.data and b.data.kind == "quest" then QuestTooltip(b, b.data.q, b.data.who) end end)
+      l:SetScript("OnLeave", function() GameTooltip:Hide() end)
       lines[n] = l
     end
+    l.data = data
     l:ClearAllPoints()
     l:SetPoint("TOPLEFT", 10 + (indent or 0), y)
     l:SetPoint("RIGHT", list, "RIGHT", -10, 0)
-    l:SetText(text); l:Show()
+    l.fs:SetText(text); l:Show()
     y = y - 18
   end
   for i, d in ipairs(rows) do
     if d.kind == "header" then
       if i > 1 then y = y - 6 end
-      line(Hex(ColorFor(d.who)) .. d.who .. "|r" .. (collapsed[d.who] and " |cffaaaaaa(" .. d.count .. ")|r" or ""))
+      line(Hex(ColorFor(d.who)) .. d.who .. "|r" .. (collapsed[d.who] and " |cffaaaaaa(" .. d.count .. ")|r" or ""), 0, d)
     elseif d.kind == "note" then line("|cff888888" .. d.text .. "|r", 14)
-    else line(d.text, 14) end
+    else line(d.text, 14, d) end
   end
   list:SetHeight(-y + 8)
   list:Show()

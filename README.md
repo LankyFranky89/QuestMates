@@ -10,6 +10,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 - Gold ring and gold text for quests you share
 - Side tab on the Map & Quest Log that opens an attached QuestMates panel (collapsible per friend, hover for objectives)
 - Floating list when the map is closed
+- Click a friend's quest (side panel or floating list) to read it; Shift-click to link it in chat
 - Alert + sound when a friend picks up the same quest as you
 - Chat message whenever a friend loots a quest item
 - Warning when you pull a quest mob and a party member doesn't have that quest

@@ -632,6 +632,19 @@ local function AnchorPanel()
   panel:Raise()
 end
 
+local function FindQuestToggle()
+  local t = WorldMapFrame.SidePanelToggle or (WorldMapFrame.BorderFrame and WorldMapFrame.BorderFrame.SidePanelToggle)
+  if t then return t end
+  local function scan(f, depth)
+    if depth > 3 then return end
+    for _, c in ipairs({ f:GetChildren() }) do
+      if (c.OpenButton and c.CloseButton) then return c end
+      local hit = scan(c, depth + 1); if hit then return hit end
+    end
+  end
+  return scan(WorldMapFrame, 0)
+end
+
 local function MakePanel()
   if panel or not WorldMapFrame then return end
   local f = CreateFrame("Frame", "QuestMatesPanel", WorldMapFrame, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -676,7 +689,7 @@ local function MakePanel()
   local b = CreateFrame("Button", "QuestMatesTab", border)
   b.Reanchor = function(self)
     self:ClearAllPoints()
-    local toggle = WorldMapFrame.SidePanelToggle or (WorldMapFrame.ScrollContainer and WorldMapFrame.SidePanelToggle)
+    local toggle = FindQuestToggle()
     if (db.buttonStyle == "stack" or db.buttonStyle == nil) and toggle then  -- stacked above the map's quest-log "?" toggle
       self:SetParent(toggle:GetParent() or WorldMapFrame)
       local w, h = toggle:GetSize()

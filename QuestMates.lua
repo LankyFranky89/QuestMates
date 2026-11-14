@@ -654,6 +654,13 @@ local function MakePanel()
   back:SetSize(84, 20); back:SetPoint("TOPRIGHT", -6, -7); back:SetText("My quests")
   back:SetScript("OnClick", function() db.panelOpen = false; RefreshList() end)
   f.CloseButton = back
+  local tb = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+  tb:SetSize(70, 20); tb:SetPoint("RIGHT", back, "LEFT", -4, 0); tb:SetText("Tracker")
+  tb:SetScript("OnClick", function() db.listShown = not db.listShown; RefreshList()
+    Print("Floating tracker " .. (db.listShown and "on (shows when the map is closed)" or "off")) end)
+  tb:SetScript("OnEnter", function(s) GameTooltip:SetOwner(s, "ANCHOR_TOP"); GameTooltip:AddLine("Floating tracker on/off")
+    GameTooltip:AddLine("Shows your group's quests under the normal quest tracker when the map is closed.", 1, 1, 1, true); GameTooltip:Show() end)
+  tb:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
   local sf = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
   sf:SetPoint("TOPLEFT", 8, -34)
@@ -833,13 +840,120 @@ local function PlaceList()
   if db.pos then list:SetPoint(db.pos[1], UIParent, db.pos[2], db.pos[3], db.pos[4])
   else list:SetPoint("RIGHT", UIParent, "RIGHT", -40, 80) end
   list:SetScale(db.scale or 1.15)
+  PlaceTracker()
+end
+
+------------------------------------------------------------------------
+-- Native-style floating tracker (looks like Blizzard's quest tracker)
+------------------------------------------------------------------------
+local trk = CreateFrame("Frame", "QuestMatesTracker", UIParent)
+trk:SetSize(250, 40)
+trk:SetMovable(true); trk:EnableMouse(false); trk:SetClampedToScreen(true)
+trk:Hide()
+local trkHead = CreateFrame("Button", nil, trk)
+trkHead:SetPoint("TOPLEFT"); trkHead:SetPoint("TOPRIGHT"); trkHead:SetHeight(26)
+trkHead:RegisterForDrag("LeftButton")
+trkHead:SetScript("OnDragStart", function() if IsShiftKeyDown() or not db.trackerLocked then trk:StartMoving() end end)
+trkHead:SetScript("OnDragStop", function()
+  trk:StopMovingOrSizing()
+  local a, _, b, x, y = trk:GetPoint(); db.trkPos = { a, b, x, y }
+end)
+local hbg = trkHead:CreateTexture(nil, "BACKGROUND")
+hbg:SetAtlas("Objective-Header", true)
+if not hbg:GetAtlas() then
+  hbg:SetTexture("Interface\\QuestFrame\\ObjectiveTracker"); hbg:SetTexCoord(0, 0.6, 0.25, 0.35)
+end
+hbg:SetPoint("TOPLEFT", -20, 8); hbg:SetPoint("BOTTOMRIGHT", 20, -10); hbg:SetAlpha(0.9)
+local htxt = trkHead:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+if _G.GameFontNormalMed2 then htxt:SetFontObject(GameFontNormalMed2) end
+htxt:SetPoint("LEFT", 6, 0); htxt:SetText("Party Quests")
+local minBtn = CreateFrame("Button", nil, trkHead)
+minBtn:SetSize(16, 16); minBtn:SetPoint("RIGHT", -4, 0)
+minBtn:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
+minBtn:SetPushedTexture("Interface\\Buttons\\UI-MinusButton-Down")
+minBtn:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
+minBtn:SetScript("OnClick", function() db.trackerMin = not db.trackerMin; RefreshList() end)
+trkHead:SetScript("OnEnter", function(s)
+  GameTooltip:SetOwner(s, "ANCHOR_LEFT"); GameTooltip:AddLine("QuestMates")
+  GameTooltip:AddLine("Drag to move. Click a quest to read it.", 1, 1, 1); GameTooltip:Show()
+end)
+trkHead:SetScript("OnLeave", function() GameTooltip:Hide() end)
+local trkLines = {}
+
+local function PlaceTracker()
+  trk:ClearAllPoints()
+  if db.trkPos then trk:SetPoint(db.trkPos[1], UIParent, db.trkPos[2], db.trkPos[3], db.trkPos[4])
+  else trk:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -90, -330) end
+end
+
+local function RefreshTracker(rows)
+  for _, l in ipairs(trkLines) do l:Hide() end
+  trk:SetScale(db.trackerScale or 1)
+  minBtn:SetNormalTexture(db.trackerMin and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
+  minBtn:SetPushedTexture(db.trackerMin and "Interface\\Buttons\\UI-PlusButton-Down" or "Interface\\Buttons\\UI-MinusButton-Down")
+  local y, n = -30, 0
+  local function line(font, text, indent, data, r, g, b)
+    n = n + 1
+    local l = trkLines[n]
+    if not l then
+      l = CreateFrame("Button", nil, trk)
+      l.fs = l:CreateFontString(nil, "OVERLAY")
+      l.fs:SetPoint("TOPLEFT"); l.fs:SetPoint("RIGHT"); l.fs:SetJustifyH("LEFT"); l.fs:SetWordWrap(true)
+      l:SetScript("OnClick", function(bt)
+        local d = bt.data; if not d then return end
+        if d.kind == "header" then collapsed[d.who] = not collapsed[d.who]; RefreshList()
+        elseif d.kind == "quest" then OpenQuest(d.q, d.who) end
+      end)
+      l:SetScript("OnEnter", function(bt)
+        if bt.data and bt.data.kind == "quest" then bt.fs:SetTextColor(1, 1, 1); QuestTooltip(bt, bt.data.q, bt.data.who) end
+      end)
+      l:SetScript("OnLeave", function(bt) if bt.r then bt.fs:SetTextColor(bt.r, bt.g, bt.b) end; GameTooltip:Hide() end)
+      trkLines[n] = l
+    end
+    l.data = data
+    l.fs:SetFontObject(font)
+    l.fs:SetText(text)
+    l.r, l.g, l.b = r, g, b
+    if r then l.fs:SetTextColor(r, g, b) end
+    l:ClearAllPoints()
+    l:SetPoint("TOPLEFT", indent, y); l:SetPoint("RIGHT", trk, "RIGHT", 0, 0)
+    local h = math.max(14, l.fs:GetStringHeight() or 14)
+    l:SetHeight(h); l:EnableMouse(data ~= nil); l:Show()
+    y = y - h - 2
+  end
+  if not db.trackerMin then
+    for i, d in ipairs(rows) do
+      if d.kind == "header" then
+        if i > 1 then y = y - 6 end
+        local c = ColorFor(d.who)
+        line("GameFontNormal", d.who .. (collapsed[d.who] and " |cff888888(" .. d.count .. ")|r" or ""), 6, d, c[1], c[2], c[3])
+      elseif d.kind == "note" then
+        line("GameFontHighlightSmall", d.text, 16, nil, 0.6, 0.6, 0.6)
+      else
+        local q = d.q
+        local shared = myQuests[q.id] and db.highlightShared ~= false
+        line("GameFontNormal", (shared and "* " or "") .. q.title, 16, d, 1, 0.82, 0)
+        if q.complete then
+          line("GameFontHighlightSmall", "- Ready for turn-in", 26, nil, 0.3, 1, 0.3)
+        else
+          for _, o in ipairs(q.objs) do
+            line("GameFontHighlightSmall", "- " .. (o.text or ""), 26, nil, o.done and 0.6 or 0.8, o.done and 0.6 or 0.8, o.done and 0.6 or 0.8)
+          end
+        end
+      end
+    end
+  end
+  trk:SetHeight(-y + 4)
+  trk:Show()
 end
 
 local function RefreshFloating()
   for _, l in ipairs(lines) do l:Hide() end
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
   local rows, nFriends = BuildRows()
-  if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); return end
+  if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); trk:Hide(); return end
+  if db.trackerStyle ~= "box" then list:Hide(); RefreshTracker(rows); return end
+  trk:Hide()
   list:SetScale(db.scale or 1.15)
   local y, n = -32, 0
   local function line(text, indent, data)
@@ -921,6 +1035,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.combatWarn == nil then db.combatWarn = true end
     db.buttonStyle = db.buttonStyle or "title"
     db.panelStyle = db.panelStyle or "inside"
+    db.trackerStyle = db.trackerStyle or "native"
     C_Timer.After(0, MakeOptions)
     db.colors = db.colors or {}
     cdb.pins = cdb.pins or {}
@@ -1111,7 +1226,10 @@ MakeOptions = function()
   check("Friends' quest areas on the map", function() return db.mapPins end, function(v) db.mapPins = v end)
   check("Highlight quests we share (gold)", function() return db.highlightShared ~= false end, function(v) db.highlightShared = v end)
   check("Spots where friends made progress", function() return db.progressPins end, function(v) db.progressPins = v end)
-  check("Floating list when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
+  y = y - 6
+  header("Floating tracker")
+  check("Show the floating tracker when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
+  choice("Tracker style", "trackerStyle", { { "native", "Like the quest tracker" }, { "box", "Box (classic)" } })
   y = y - 6
   header("Alerts")
   check("Alert when a friend picks up the same quest", function() return db.alerts end, function(v) db.alerts = v end)
@@ -1199,11 +1317,14 @@ SlashCmdList.QUESTMATES = function(msg)
       local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
       Print(string.format("  %s: %d quests received", who, c))
     end
+  elseif msg == "tracker" then
+    db.listShown = not db.listShown; RefreshList()
+    Print("Floating tracker " .. (db.listShown and "on" or "off"))
   elseif msg == "options" or msg == "config" or msg == "settings" then
     OpenOptions()
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm options - settings window | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm options - settings window | /qm tracker | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

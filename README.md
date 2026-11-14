@@ -9,7 +9,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 - Small dots where friends made quest progress
 - Gold ring and gold text for quests you share
 - QuestMates button in the Map & Quest Log title bar: swaps your quest list for your group's quests (collapsible per friend, hover for objectives)
-- Floating list when the map is closed
+- Floating tracker when the map is closed, styled like the normal quest tracker (Tracker button in the party view, or classic box style in options)
 - Click a friend's quest (side panel or floating list) to read it; Shift-click to link it in chat
 - Alert + sound when a friend picks up the same quest as you
 - Chat message whenever a friend loots a quest item
@@ -26,6 +26,7 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 |---|---|
 | `/qm` | Show/hide the floating list |
 | `/qm options` | Settings window (also under Esc > Options > AddOns), incl. classic side tab / side panel style |
+| `/qm tracker` | Floating tracker on/off |
 | `/qm map` | Map markers on/off |
 | `/qm shared` | Shared-quest highlight on/off |
 | `/qm progress` | Progress dots on/off |

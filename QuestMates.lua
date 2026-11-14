@@ -843,6 +843,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.progressPins == nil then db.progressPins = true end
     if db.alerts == nil then db.alerts = true end
     if db.itemAlerts == nil then db.itemAlerts = true end
+    if db.combatWarn == nil then db.combatWarn = true end
     db.colors = db.colors or {}
     cdb.pins = cdb.pins or {}
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -886,6 +887,101 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
 end)
 
 ------------------------------------------------------------------------
+-- Combat reminder: you pull a quest mob, a party member lacks that quest
+------------------------------------------------------------------------
+local scanTip
+local function UnitLines(unit)
+  local lines = {}
+  if C_TooltipInfo and C_TooltipInfo.GetUnit then
+    local data = C_TooltipInfo.GetUnit(unit)
+    if data and data.lines then
+      for _, l in ipairs(data.lines) do if l.leftText then lines[#lines + 1] = l.leftText end end
+      return lines
+    end
+  end
+  if not scanTip then
+    scanTip = CreateFrame("GameTooltip", "QuestMatesScanTip", nil, "GameTooltipTemplate")
+    scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+  end
+  scanTip:ClearLines()
+  scanTip:SetUnit(unit)
+  for i = 1, scanTip:NumLines() do
+    local fs = _G["QuestMatesScanTipTextLeft" .. i]
+    local t = fs and fs:GetText()
+    if t then lines[#lines + 1] = t end
+  end
+  return lines
+end
+
+local function MobQuests(unit)
+  local found = {}
+  if not UnitExists(unit) or UnitIsPlayer(unit) or not UnitCanAttack("player", unit) then return found end
+  local name = UnitName(unit)
+  local lines = UnitLines(unit)
+  for qid, q in pairs(myQuests) do
+    if not q.complete then
+      local hit = false
+      for _, l in ipairs(lines) do
+        if l == q.title then hit = true break end
+      end
+      if not hit and name then
+        for _, o in ipairs(q.objs or {}) do
+          if not o.done and o.text and o.text:find(name, 1, true) then hit = true break end
+        end
+      end
+      if hit then found[qid] = q end
+    end
+  end
+  return found
+end
+
+local warned = {} -- [guid..qid] = true
+local function CheckPull()
+  if not db or db.combatWarn == false or not Channel() then return end
+  local unit = "target"
+  if not UnitExists(unit) or not UnitAffectingCombat(unit) then
+    if UnitExists("mouseover") and UnitCanAttack("player", "mouseover") then unit = "mouseover" else return end
+  end
+  local guid = UnitGUID(unit) or "?"
+  local members = GroupMembers()
+  for qid, q in pairs(MobQuests(unit)) do
+    local key = guid .. qid
+    if not warned[key] then
+      local missing, unknown = {}, {}
+      for who in pairs(members) do
+        if who ~= Short(UnitName("player")) then
+          local fr = friends[who]
+          if not fr or not fr.synced then unknown[#unknown + 1] = who
+          elseif not fr.quests[qid] then missing[#missing + 1] = Hex(ColorFor(who)) .. who .. "|r" end
+        end
+      end
+      if #missing > 0 then
+        warned[key] = true
+        local names = table.concat(missing, ", ")
+        Print("|cffff5555Heads up:|r " .. names .. " " .. (#missing == 1 and "doesn't" or "don't")
+          .. " have |cffffd100" .. q.title .. "|r")
+        if RaidNotice_AddMessage and RaidWarningFrame then
+          RaidNotice_AddMessage(RaidWarningFrame, names .. " missing: " .. q.title, ChatTypeInfo["RAID_WARNING"])
+        end
+        if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
+      end
+    end
+  end
+end
+
+local combatEv = CreateFrame("Frame")
+combatEv:RegisterEvent("PLAYER_REGEN_DISABLED")
+combatEv:RegisterEvent("PLAYER_REGEN_ENABLED")
+combatEv:SetScript("OnEvent", function(_, e)
+  if e == "PLAYER_REGEN_DISABLED" then
+    CheckPull()
+    C_Timer.After(0.5, CheckPull) -- target often set a moment after combat starts
+  else
+    wipe(warned)
+  end
+end)
+
+------------------------------------------------------------------------
 -- Slash commands
 ------------------------------------------------------------------------
 SLASH_QUESTMATES1 = "/qm"
@@ -915,6 +1011,9 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "items" then
     db.itemAlerts = not db.itemAlerts
     Print("Friend quest item messages " .. (db.itemAlerts and "on" or "off"))
+  elseif msg == "pull" then
+    db.combatWarn = not db.combatWarn
+    Print("Missing-quest pull warning " .. (db.combatWarn and "on" or "off"))
   elseif msg == "dock" then
     db.dock = (db.dock == false); RefreshList()
     Print("Map tab and side panel " .. (db.dock ~= false and "on" or "off"))
@@ -944,6 +1043,6 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm - show/hide the floating list (or click the tab on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm dock (map tab on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm - show/hide the floating list (or click the tab on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map tab on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

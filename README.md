@@ -25,6 +25,7 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 | Command | What it does |
 |---|---|
 | `/qm` | Show/hide the floating list |
+| `/qm options` | Settings window (also under Esc > Options > AddOns), incl. classic side tab / side panel style |
 | `/qm map` | Map markers on/off |
 | `/qm shared` | Shared-quest highlight on/off |
 | `/qm progress` | Progress dots on/off |

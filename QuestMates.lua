@@ -12,6 +12,7 @@ local mySnapshot = {}     -- [qid] = { [objIndex] = numFulfilled } for progress 
 local lastSent = {}       -- [qid] = payload string
 local scanned = false
 local Alert -- defined further down, used by ScanLog
+local MakeOptions -- defined further down
 
 local PALETTE = {
   { 0.20, 0.85, 1.00 }, -- cyan
@@ -614,7 +615,7 @@ end
 local function AnchorPanel()
   if not panel then return end
   panel:ClearAllPoints()
-  local q = QuestListArea()
+  local q = (db.panelStyle ~= "side") and QuestListArea() or nil
   if q then
     panel:SetAllPoints(q)            -- sits on top of your quest list
     panel.inMap = true
@@ -666,10 +667,23 @@ local function MakePanel()
   local border = WorldMapFrame.BorderFrame or WorldMapFrame
   local anchor = (border.MaximizeMinimizeFrame) or (WorldMapFrame.MaximizeMinimizeFrame) or border.CloseButton or WorldMapFrame.CloseButton
   local b = CreateFrame("Button", "QuestMatesTab", border)
-  b:SetSize(22, 22)
-  if anchor then b:SetPoint("RIGHT", anchor, "LEFT", -2, 0) else b:SetPoint("TOPRIGHT", WorldMapFrame, "TOPRIGHT", -60, -2) end
-  b:SetFrameLevel((anchor or border):GetFrameLevel() + 5)
-  b.Reanchor = function() end
+  b.Reanchor = function(self)
+    self:ClearAllPoints()
+    if db.buttonStyle == "side" then         -- classic: tab sticking out of the map's right edge
+      self:SetParent(WorldMapFrame)
+      self:SetSize(34, 44)
+      local edgeOf = (panel and panel:IsShown() and not panel.inMap) and panel or WorldMapFrame
+      self:SetPoint("TOPLEFT", edgeOf, "TOPRIGHT", -4, -70)
+      self:SetFrameStrata(edgeOf:GetFrameStrata())
+      self:SetFrameLevel(edgeOf:GetFrameLevel() + 20)
+    else                                      -- title bar, next to maximize/close
+      self:SetParent(border)
+      self:SetSize(22, 22)
+      if anchor then self:SetPoint("RIGHT", anchor, "LEFT", -2, 0) else self:SetPoint("TOPRIGHT", WorldMapFrame, "TOPRIGHT", -60, -2) end
+      self:SetFrameStrata((anchor or border):GetFrameStrata())
+      self:SetFrameLevel((anchor or border):GetFrameLevel() + 5)
+    end
+  end
   local edge = b:CreateTexture(nil, "BACKGROUND")
   edge:SetTexture("Interface\\Buttons\\WHITE8X8"); edge:SetVertexColor(0.75, 0.6, 0.3, 1); edge:SetAllPoints()
   local icon = b:CreateTexture(nil, "ARTWORK")
@@ -734,9 +748,10 @@ local function RefreshPanel()
   local rows, nFriends = BuildRows()
   tab.badge:SetText(nFriends > 0 and nFriends or "")
   tab.on:SetShown(db.panelOpen and true or false)
-  if not (mapOpen and db.panelOpen and db.dock ~= false) then panel:Hide(); return end
+  if not (mapOpen and db.panelOpen and db.dock ~= false) then panel:Hide(); tab:Reanchor(); return end
   AnchorPanel()
   panel:Show()
+  tab:Reanchor()
   local w = scroll:GetWidth()
   if not w or w < 50 then
     w = 250
@@ -904,6 +919,9 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.alerts == nil then db.alerts = true end
     if db.itemAlerts == nil then db.itemAlerts = true end
     if db.combatWarn == nil then db.combatWarn = true end
+    db.buttonStyle = db.buttonStyle or "title"
+    db.panelStyle = db.panelStyle or "inside"
+    C_Timer.After(0, MakeOptions)
     db.colors = db.colors or {}
     cdb.pins = cdb.pins or {}
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -1042,6 +1060,87 @@ combatEv:SetScript("OnEvent", function(_, e)
 end)
 
 ------------------------------------------------------------------------
+-- Options (Esc > Options > AddOns > QuestMates)
+------------------------------------------------------------------------
+local optionsCategory
+MakeOptions = function()
+  if optionsCategory ~= nil then return end
+  local p = CreateFrame("Frame")
+  p.name = "QuestMates"
+  local y = -16
+  local function header(text)
+    local h = p:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    h:SetPoint("TOPLEFT", 16, y); h:SetText(text); y = y - 28
+  end
+  local refreshers = {}
+  local function check(label, get, set, tip)
+    local cb = CreateFrame("CheckButton", nil, p, "UICheckButtonTemplate")
+    cb:SetPoint("TOPLEFT", 16, y); y = y - 28
+    local t = cb.Text or cb.text or cb:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    if not (cb.Text or cb.text) then t:SetPoint("LEFT", cb, "RIGHT", 2, 0) end
+    t:SetText(label)
+    cb:SetScript("OnClick", function(s) set(s:GetChecked() and true or false); RefreshAll() end)
+    if tip then
+      cb:SetScript("OnEnter", function(s) GameTooltip:SetOwner(s, "ANCHOR_RIGHT"); GameTooltip:AddLine(tip, 1, 1, 1, true); GameTooltip:Show() end)
+      cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    refreshers[#refreshers + 1] = function() cb:SetChecked(get()) end
+  end
+  local function choice(label, key, opts)
+    local l = p:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    l:SetPoint("TOPLEFT", 20, y - 4); l:SetText(label)
+    local x = 200
+    for _, o in ipairs(opts) do
+      local rb = CreateFrame("CheckButton", nil, p, "UIRadioButtonTemplate")
+      rb:SetPoint("TOPLEFT", x, y - 2)
+      local t = rb:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+      t:SetPoint("LEFT", rb, "RIGHT", 4, 0); t:SetText(o[2])
+      rb:SetScript("OnClick", function() db[key] = o[1]; for _, f in ipairs(refreshers) do f() end; RefreshAll() end)
+      refreshers[#refreshers + 1] = function() rb:SetChecked(db[key] == o[1]) end
+      x = x + 40 + t:GetStringWidth() + 20
+    end
+    y = y - 30
+  end
+
+  header("Map window")
+  check("Show the QuestMates button on the map", function() return db.dock ~= false end, function(v) db.dock = v end)
+  choice("Button style", "buttonStyle", { { "title", "Title bar icon" }, { "side", "Side tab (classic)" } })
+  choice("Party quests show", "panelStyle", { { "inside", "Over my quest list" }, { "side", "Beside the map (classic)" } })
+  y = y - 6
+  header("Map")
+  check("Friends' quest areas on the map", function() return db.mapPins end, function(v) db.mapPins = v end)
+  check("Highlight quests we share (gold)", function() return db.highlightShared ~= false end, function(v) db.highlightShared = v end)
+  check("Spots where friends made progress", function() return db.progressPins end, function(v) db.progressPins = v end)
+  check("Floating list when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
+  y = y - 6
+  header("Alerts")
+  check("Alert when a friend picks up the same quest", function() return db.alerts end, function(v) db.alerts = v end)
+  check("Chat message when a friend loots a quest item", function() return db.itemAlerts end, function(v) db.itemAlerts = v end)
+  check("Warn when I pull a quest mob a friend doesn't have the quest for", function() return db.combatWarn end, function(v) db.combatWarn = v end)
+  check("Stamp quest links in chat (done / in log)", function() return not (db.stamp and db.stamp.enabled == false) end,
+    function(v) db.stamp = db.stamp or {}; db.stamp.enabled = v end)
+
+  p:SetScript("OnShow", function() for _, f in ipairs(refreshers) do f() end end)
+  if Settings and Settings.RegisterCanvasLayoutCategory then
+    optionsCategory = Settings.RegisterCanvasLayoutCategory(p, "QuestMates")
+    Settings.RegisterAddOnCategory(optionsCategory)
+  elseif InterfaceOptions_AddCategory then
+    InterfaceOptions_AddCategory(p); optionsCategory = p
+  else
+    optionsCategory = false
+  end
+end
+
+local function OpenOptions()
+  if not optionsCategory then Print("Options window isn't available in this client.") return end
+  if Settings and Settings.OpenToCategory and type(optionsCategory) == "table" and optionsCategory.GetID then
+    Settings.OpenToCategory(optionsCategory:GetID())
+  elseif InterfaceOptionsFrame_OpenToCategory then
+    InterfaceOptionsFrame_OpenToCategory(optionsCategory); InterfaceOptionsFrame_OpenToCategory(optionsCategory)
+  end
+end
+
+------------------------------------------------------------------------
 -- Slash commands
 ------------------------------------------------------------------------
 SLASH_QUESTMATES1 = "/qm"
@@ -1100,9 +1199,11 @@ SlashCmdList.QUESTMATES = function(msg)
       local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
       Print(string.format("  %s: %d quests received", who, c))
     end
+  elseif msg == "options" or msg == "config" or msg == "settings" then
+    OpenOptions()
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm options - settings window | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

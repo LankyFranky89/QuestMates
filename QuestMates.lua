@@ -578,7 +578,7 @@ local function OpenQuest(q, who)
     if ChatEdit_InsertLink(QuestLink(q)) then return end
   end
   if myQuests[q.id] and not IsShiftKeyDown() then
-    if QuestLogForever_OpenQuest and QuestLogForever_OpenQuest(q.id) then return end
+    if QuestLedgerForever_OpenQuest and QuestLedgerForever_OpenQuest(q.id) then return end
     if QuestMapFrame_OpenToQuestDetails then QuestMapFrame_OpenToQuestDetails(q.id) return end
     if QuestLog_OpenToQuestIndex and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
       local idx = C_QuestLog.GetLogIndexForQuestID(q.id)
@@ -824,8 +824,8 @@ end
 local function RefreshPanel()
   if not panel then return end
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
-  -- Quest Log Forever "pure map": no quest-log elements on the map (pins stay)
-  if QuestLogForever_IsPureMap and QuestLogForever_IsPureMap() then
+  -- Quest Ledger Forever "pure map": no quest-log elements on the map (pins stay)
+  if QuestLedgerForever_IsPureMap and QuestLedgerForever_IsPureMap() then
     tab:Hide(); panel:Hide(); return
   end
   tab:SetShown(mapOpen and db.dock ~= false)
@@ -1074,7 +1074,7 @@ RefreshList = function()
   if not db then return end
   RefreshPanel()
   RefreshFloating()
-  if QuestLogForever_OnMatesUpdate then pcall(QuestLogForever_OnMatesUpdate) end
+  if QuestLedgerForever_OnMatesUpdate then pcall(QuestLedgerForever_OnMatesUpdate) end
 end
 
 RefreshAll = function()
@@ -1083,7 +1083,7 @@ RefreshAll = function()
 end
 
 ------------------------------------------------------------------------
--- Public API (used by Quest Log Forever)
+-- Public API (used by Quest Ledger Forever)
 ------------------------------------------------------------------------
 QuestMatesAPI = {
   -- party members (with QuestMates) who also have this quest

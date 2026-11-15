@@ -578,6 +578,7 @@ local function OpenQuest(q, who)
     if ChatEdit_InsertLink(QuestLink(q)) then return end
   end
   if myQuests[q.id] and not IsShiftKeyDown() then
+    if QuestLogForever_OpenQuest and QuestLogForever_OpenQuest(q.id) then return end
     if QuestMapFrame_OpenToQuestDetails then QuestMapFrame_OpenToQuestDetails(q.id) return end
     if QuestLog_OpenToQuestIndex and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
       local idx = C_QuestLog.GetLogIndexForQuestID(q.id)
@@ -823,6 +824,10 @@ end
 local function RefreshPanel()
   if not panel then return end
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
+  -- Quest Log Forever "pure map": no quest-log elements on the map (pins stay)
+  if QuestLogForever_IsPureMap and QuestLogForever_IsPureMap() then
+    tab:Hide(); panel:Hide(); return
+  end
   tab:SetShown(mapOpen and db.dock ~= false)
   local rows, nFriends = BuildRows()
   tab.badge:SetText(nFriends > 0 and nFriends or "")
@@ -1069,12 +1074,39 @@ RefreshList = function()
   if not db then return end
   RefreshPanel()
   RefreshFloating()
+  if QuestLogForever_OnMatesUpdate then pcall(QuestLogForever_OnMatesUpdate) end
 end
 
 RefreshAll = function()
   RefreshPins()
   RefreshList()
 end
+
+------------------------------------------------------------------------
+-- Public API (used by Quest Log Forever)
+------------------------------------------------------------------------
+QuestMatesAPI = {
+  -- party members (with QuestMates) who also have this quest
+  FriendsOnQuest = function(qid)
+    local out = {}
+    if not db or not qid then return out end
+    local members = GroupMembers()
+    for who, fr in pairs(friends) do
+      local q = members[who] and fr.quests[qid]
+      if q then out[#out + 1] = { who = who, color = ColorFor(who), complete = q.complete, objs = q.objs or {} } end
+    end
+    table.sort(out, function(a, b) return a.who < b.who end)
+    return out
+  end,
+  Rows = function() if db then return BuildRows() end return {}, 0 end,
+  ToggleCollapsed = function(who) collapsed[who] = not collapsed[who]; RefreshList() end,
+  IsCollapsed = function(who) return collapsed[who] end,
+  OpenQuest = function(q, who) OpenQuest(q, who) end,
+  QuestTooltip = function(owner, q, who) QuestTooltip(owner, q, who) end,
+  Color = function(who) return ColorFor(who) end,
+  Disc = MEDIA .. "Disc",
+  Refresh = function() RefreshList() end,
+}
 
 ------------------------------------------------------------------------
 -- Events

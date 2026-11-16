@@ -13,7 +13,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 - Click a friend's quest (side panel or floating list) to read it; Shift-click to link it in chat
 - Alert + sound when a friend picks up the same quest as you
 - Chat message whenever a friend loots a quest item
-- Arrow on screen pointing to the nearest quest a friend is tracking (in their color, with yards; click to cycle)
+- Points to the nearest quest a friend is tracking with the game's own in-world marker, in the friend's color (classic arrow style in options)
 - Warning when you pull a named quest mob (rare, elite, boss, or a quest needing just that one) and a party member doesn't have that quest
 - Quest links in chat get a stamp: green check = done, yellow **?** = in your log (formerly the QuestStamp addon)
 
@@ -27,7 +27,8 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 |---|---|
 | `/qm` | Show/hide the floating list |
 | `/qm options` | Settings window (also under Esc > Options > AddOns), incl. classic side tab / side panel style |
-| `/qm arrow` | Friend quest arrow on/off |
+| `/qm arrow` | Friend quest pointer on/off |
+| `/qm arrow next` | Point to the next friend quest |
 | `/qm tracker` | Floating tracker on/off |
 | `/qm map` | Map markers on/off |
 | `/qm shared` | Shared-quest highlight on/off |

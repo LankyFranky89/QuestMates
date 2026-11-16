@@ -1024,10 +1024,10 @@ local function ArrowTargets()
             if x and w then
               local dxE, dyS = (p.x - x) * w, (p.y - y) * h
               local d = math.sqrt(dxE * dxE + dyS * dyS)
-              if not best or d < best.d then best = { d = d, dxE = dxE, dyS = dyS } end
+              if not best or d < best.d then best = { d = d, dxE = dxE, dyS = dyS, p = p } end
             end
           end
-          if best then list[#list + 1] = { who = who, q = q, d = best.d, dxE = best.dxE, dyS = best.dyS } end
+          if best then list[#list + 1] = { who = who, q = q, d = best.d, dxE = best.dxE, dyS = best.dyS, p = best.p } end
         end
       end
     end
@@ -1036,18 +1036,86 @@ local function ArrowTargets()
   return list
 end
 
+
+-- Blizzard's own in-world marker (same one Quest Ledger Forever uses), placed on the friend's quest area
+local mk = { owned = false, key = nil }
+local function MarkerSupported()
+  return C_Map and C_Map.SetUserWaypoint and C_SuperTrack and C_SuperTrack.SetSuperTrackedUserWaypoint
+    and UiMapPoint and UiMapPoint.CreateFromCoordinates and SuperTrackedFrame
+end
+local function MarkerOwned()
+  return mk.owned and C_SuperTrack.IsSuperTrackingUserWaypoint and C_SuperTrack.IsSuperTrackingUserWaypoint()
+end
+local function MarkerClear()
+  if mk.owned then
+    if MarkerOwned() and C_Map.ClearUserWaypoint then pcall(C_Map.ClearUserWaypoint) end
+    mk.owned, mk.key = false, nil
+  end
+  if mk.label then mk.label:Hide() end
+end
+local function MarkerColor()
+  local stf = SuperTrackedFrame
+  if not (stf and mk.target and MarkerOwned()) then if mk.label then mk.label:Hide() end return end
+  local c = ColorFor(mk.target.who)
+  for _, key in ipairs({ "Icon", "Arrow" }) do
+    local t = stf[key]; if t and t.SetVertexColor then t:SetVertexColor(c[1], c[2], c[3]) end
+  end
+  if stf.DistanceText and stf.DistanceText.SetTextColor then stf.DistanceText:SetTextColor(c[1], c[2], c[3]) end
+  if not mk.label then
+    mk.label = stf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    mk.label:SetPoint("TOP", stf.DistanceText or stf, "BOTTOM", 0, -2)
+  end
+  mk.label:SetText(mk.target.who .. ": |cffffd100" .. mk.target.q.title .. "|r")
+  mk.label:SetTextColor(c[1], c[2], c[3])
+  mk.label:SetShown(stf:IsShown())
+end
+local function MarkerTo(t)
+  mk.target = t
+  local p = t.p
+  local key = t.who .. ":" .. t.q.id .. ":" .. p.m .. ":" .. string.format("%.3f,%.3f", p.x, p.y)
+  if key ~= mk.key then
+    mk.key = key
+    if C_Map.CanSetUserWaypointOnMap and not C_Map.CanSetUserWaypointOnMap(p.m) then mk.owned = false; return end
+    local ok = pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(p.m, p.x, p.y))
+    if ok then
+      pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
+      if SetCVar and GetCVar and GetCVar("showInGameNavigation") ~= "1" then pcall(SetCVar, "showInGameNavigation", "1") end
+      mk.owned = true
+    end
+  end
+  MarkerColor()
+end
+if SuperTrackedFrame then
+  SuperTrackedFrame:HookScript("OnUpdate", function() if mk.owned then MarkerColor() end end)
+end
+-- Quest Ledger Forever recolors the same marker by distance; put the friend color back right after it
+local function HookLedger()
+  if type(QLF_ColorMarker) == "function" and not mk.ledgerHooked then
+    mk.ledgerHooked = true
+    hooksecurefunc("QLF_ColorMarker", function() if mk.owned then MarkerColor() end end)
+  end
+end
+HookLedger()
+local hl = CreateFrame("Frame"); hl:RegisterEvent("PLAYER_LOGIN"); hl:SetScript("OnEvent", HookLedger)
+
 local arrowElapsed = 0
 arrow.driver = CreateFrame("Frame")
 arrow.driver:SetScript("OnUpdate", function(_, el)
   arrowElapsed = arrowElapsed + el
   if arrowElapsed < 0.05 then return end
   arrowElapsed = 0
-  if not db or not db.pointer or not Channel() or (IsInInstance and IsInInstance()) then arrow:Hide(); return end
+  if not db or not db.pointer or not Channel() or (IsInInstance and IsInInstance()) then arrow:Hide(); MarkerClear(); return end
   local list = ArrowTargets()
-  if #list == 0 then arrow:Hide(); arrowTarget = nil; return end
+  if #list == 0 then arrow:Hide(); arrowTarget = nil; MarkerClear(); return end
   if not arrow.placed then PlaceArrow(); arrow.placed = true end
   local t = list[(arrowSkip % #list) + 1]
   arrowTarget = t
+  if db.arrowStyle ~= "classic" and MarkerSupported() then
+    arrow:Hide()
+    MarkerTo(t)
+    return
+  end
+  MarkerClear()
   local c = ColorFor(t.who)
   arrow.tex:SetVertexColor(c[1], c[2], c[3])
   arrow.who:SetText(t.who .. (#list > 1 and string.format(" |cffaaaaaa(%d/%d)|r", (arrowSkip % #list) + 1, #list) or ""))
@@ -1251,6 +1319,8 @@ QuestMatesAPI = {
   Color = function(who) return ColorFor(who) end,
   Disc = MEDIA .. "Disc",
   Refresh = function() RefreshList() end,
+  -- true while QuestMates has the game's in-world marker on a friend's quest (Quest Ledger then leaves its color alone)
+  OwnsMarker = function() return MarkerOwned() and true or false end,
 }
 
 ------------------------------------------------------------------------
@@ -1286,6 +1356,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.itemAlerts == nil then db.itemAlerts = true end
     if db.combatWarn == nil then db.combatWarn = true end
     if db.pointer == nil then db.pointer = true end
+    db.arrowStyle = db.arrowStyle or "blizzard"
     if not db.stackDefaulted then db.buttonStyle = "stack"; db.stackDefaulted = true end
     db.panelStyle = db.panelStyle or "inside"
     db.trackerStyle = db.trackerStyle or "native"
@@ -1497,7 +1568,8 @@ MakeOptions = function()
   check("Alert when a friend picks up the same quest", function() return db.alerts end, function(v) db.alerts = v end)
   check("Chat message when a friend loots a quest item", function() return db.itemAlerts end, function(v) db.itemAlerts = v end)
   check("Warn when I pull a quest mob a friend doesn't have the quest for", function() return db.combatWarn end, function(v) db.combatWarn = v end)
-  check("Arrow pointing to quests my friends track", function() return db.pointer end, function(v) db.pointer = v end)
+  check("Point to quests my friends track", function() return db.pointer end, function(v) db.pointer = v end)
+  choice("Pointer style", "arrowStyle", { { "blizzard", "Game marker (like Quest Ledger)" }, { "classic", "Arrow (classic)" } })
   check("Stamp quest links in chat (done / in log)", function() return not (db.stamp and db.stamp.enabled == false) end,
     function(v) db.stamp = db.stamp or {}; db.stamp.enabled = v end)
 
@@ -1595,6 +1667,8 @@ SlashCmdList.QUESTMATES = function(msg)
         tostring(members[who] ~= nil), tostring(fr.synced), n, withPts))
     end
     Print("Arrow targets right now: " .. #ArrowTargets())
+  elseif msg == "arrow next" then
+    arrowSkip = arrowSkip + 1; Print("Pointing to the next friend quest.")
   elseif msg == "pointer" or msg == "arrow" then
     db.pointer = not db.pointer
     Print("Friend quest arrow " .. (db.pointer and "on" or "off"))

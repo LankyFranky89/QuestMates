@@ -1353,6 +1353,9 @@ local function MobQuests(unit)
   local found = {}
   if not UnitExists(unit) or UnitIsPlayer(unit) or not UnitCanAttack("player", unit) then return found end
   local name = UnitName(unit)
+  -- only named mobs: rares/elites/bosses, or a quest that wants exactly one of this mob
+  local cls = UnitClassification and UnitClassification(unit) or "normal"
+  local special = cls == "elite" or cls == "rare" or cls == "rareelite" or cls == "worldboss"
   local lines = UnitLines(unit)
   for qid, q in pairs(myQuests) do
     if not q.complete then
@@ -1360,12 +1363,16 @@ local function MobQuests(unit)
       for _, l in ipairs(lines) do
         if l == q.title then hit = true break end
       end
-      if not hit and name then
+      local single = false
+      if name then
         for _, o in ipairs(q.objs or {}) do
-          if not o.done and o.text and o.text:find(name, 1, true) then hit = true break end
+          if not o.done and o.text and o.text:find(name, 1, true) then
+            hit = true
+            if (o.need or 0) <= 1 then single = true end
+          end
         end
       end
-      if hit then found[qid] = q end
+      if hit and (special or single) then found[qid] = q end
     end
   end
   return found

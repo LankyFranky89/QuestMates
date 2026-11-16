@@ -177,6 +177,13 @@ local function AddProgressPin(qid)
   while #list > 6 do table.remove(list, 1) end
 end
 
+local function IsTracked(qid, logIndex)
+  if C_QuestLog and C_QuestLog.GetQuestWatchType then return C_QuestLog.GetQuestWatchType(qid) ~= nil end
+  if C_QuestLog and C_QuestLog.IsQuestWatched then return C_QuestLog.IsQuestWatched(qid) and true or false end
+  if IsQuestWatched and logIndex then return IsQuestWatched(logIndex) and true or false end
+  return false
+end
+
 local function ScanLog()
   local quests = {}
   local onMap = BuildOnMapCache()
@@ -184,7 +191,8 @@ local function ScanLog()
     if not qid or qid == 0 then return end
     local objs = Objectives(qid, logIndex)
     quests[qid] = { id = qid, title = title or ("Quest " .. qid), level = level or 0,
-      complete = complete and true or false, objs = objs, pois = QuestPOIs(qid, onMap) }
+      complete = complete and true or false, objs = objs, pois = QuestPOIs(qid, onMap),
+      tracked = IsTracked(qid, logIndex) }
     -- progress pins: an objective count went up since last scan
     local prev = mySnapshot[qid]
     local snap = {}
@@ -273,7 +281,7 @@ local function Encode(q)
   for i, p in ipairs(q.pois) do pois[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
   for i, p in ipairs(q.pins or {}) do pins[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
   return table.concat({ "Q", q.id, q.level or 0, q.complete and 1 or 0, Clean(q.title),
-    table.concat(objs, OSEP), table.concat(pois, PSEP), table.concat(pins, PSEP) }, SEP)
+    table.concat(objs, OSEP), table.concat(pois, PSEP), table.concat(pins, PSEP), q.tracked and 1 or 0 }, SEP)
 end
 
 local function Broadcast(force)
@@ -368,7 +376,7 @@ local function Handle(sender, msg)
       end
     end
     fr.quests[qid] = { id = qid, level = tonumber(f[3]) or 0, complete = f[4] == "1", title = f[5] or "?",
-      objs = objs, pois = DecodePoints(f[7]), pins = DecodePoints(f[8]) }
+      objs = objs, pois = DecodePoints(f[7]), pins = DecodePoints(f[8]), tracked = f[9] == "1" }
   elseif kind == "S" then
     local keep = {}
     for _, id in ipairs(Split(f[2], ",")) do keep[tonumber(id) or 0] = true end
@@ -920,6 +928,131 @@ local function PlaceList()
 end
 
 ------------------------------------------------------------------------
+-- Arrow in the world pointing to the nearest quest a friend is tracking
+------------------------------------------------------------------------
+local arrow = CreateFrame("Button", "QuestMatesArrow", UIParent)
+arrow:SetSize(56, 56)
+arrow:SetMovable(true); arrow:SetClampedToScreen(true)
+arrow:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+arrow:RegisterForDrag("LeftButton")
+arrow:Hide()
+arrow.tex = arrow:CreateTexture(nil, "ARTWORK")
+arrow.tex:SetTexture("Interface\\Minimap\\MinimapArrow")
+arrow.tex:SetAllPoints()
+arrow.who = arrow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+arrow.who:SetPoint("TOP", arrow, "BOTTOM", 0, -2)
+arrow.quest = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+arrow.quest:SetPoint("TOP", arrow.who, "BOTTOM", 0, -1)
+arrow.dist = arrow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+arrow.dist:SetPoint("TOP", arrow.quest, "BOTTOM", 0, -1)
+arrow:SetScript("OnDragStart", function(s) if IsShiftKeyDown() then s:StartMoving() end end)
+arrow:SetScript("OnDragStop", function(s)
+  s:StopMovingOrSizing()
+  local a, _, b, x, y = s:GetPoint(); db.arrowPos = { a, b, x, y }
+end)
+
+local arrowSkip = 0       -- left-click cycles to the next-nearest target
+local arrowTarget         -- current target, for click-to-read
+arrow:SetScript("OnClick", function(_, btn)
+  if btn == "RightButton" then
+    if arrowTarget then OpenQuest(arrowTarget.q, arrowTarget.who) end
+  else
+    arrowSkip = arrowSkip + 1
+  end
+end)
+arrow:SetScript("OnEnter", function(s)
+  GameTooltip:SetOwner(s, "ANCHOR_BOTTOM")
+  GameTooltip:AddLine("QuestMates arrow")
+  GameTooltip:AddLine("Points to the nearest quest a friend is tracking.", 1, 1, 1, true)
+  GameTooltip:AddLine("Left-click: next friend quest  Right-click: read quest", 0.5, 0.8, 1)
+  GameTooltip:AddLine("Shift-drag: move  /qm arrow: turn off", 0.5, 0.8, 1)
+  GameTooltip:Show()
+end)
+arrow:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+local function PlaceArrow()
+  arrow:ClearAllPoints()
+  if db.arrowPos then arrow:SetPoint(db.arrowPos[1], UIParent, db.arrowPos[2], db.arrowPos[3], db.arrowPos[4])
+  else arrow:SetPoint("TOP", UIParent, "TOP", 0, -140) end
+end
+
+-- player position expressed on another map (so we can measure against quest points on that map)
+local function PlayerOnMap(pm, px, py, target)
+  if pm == target then return px, py end
+  if not (C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D) then return end
+  local cont, world = C_Map.GetWorldPosFromMapPos(pm, CreateVector2D(px, py))
+  if not (cont and world) then return end
+  local _, pos = C_Map.GetMapPosFromWorldPos(cont, world, target)
+  if not pos then return end
+  local x, y = pos.x, pos.y
+  if pos.GetXY then x, y = pos:GetXY() end
+  return x, y
+end
+
+local function MapSize(m)
+  if C_Map.GetMapWorldSize then
+    local w, h = C_Map.GetMapWorldSize(m)
+    if w and w > 0 then return w, h end
+  end
+end
+
+local function ArrowTargets()
+  local list = {}
+  local pm, px, py = PlayerPos()
+  if not pm then return list end
+  local members = GroupMembers()
+  for who, fr in pairs(friends) do
+    if members[who] then
+      for _, q in pairs(fr.quests) do
+        if q.tracked then
+          local best
+          for _, p in ipairs(q.pois or {}) do
+            local x, y = PlayerOnMap(pm, px, py, p.m)
+            local w, h = MapSize(p.m)
+            if x and w then
+              local dxE, dyS = (p.x - x) * w, (p.y - y) * h
+              local d = math.sqrt(dxE * dxE + dyS * dyS)
+              if not best or d < best.d then best = { d = d, dxE = dxE, dyS = dyS } end
+            end
+          end
+          if best then list[#list + 1] = { who = who, q = q, d = best.d, dxE = best.dxE, dyS = best.dyS } end
+        end
+      end
+    end
+  end
+  table.sort(list, function(a, b) return a.d < b.d end)
+  return list
+end
+
+local arrowElapsed = 0
+arrow.driver = CreateFrame("Frame")
+arrow.driver:SetScript("OnUpdate", function(_, el)
+  arrowElapsed = arrowElapsed + el
+  if arrowElapsed < 0.05 then return end
+  arrowElapsed = 0
+  if not db or not db.pointer or not Channel() or (IsInInstance and IsInInstance()) then arrow:Hide(); return end
+  local list = ArrowTargets()
+  if #list == 0 then arrow:Hide(); arrowTarget = nil; return end
+  if not arrow.placed then PlaceArrow(); arrow.placed = true end
+  local t = list[(arrowSkip % #list) + 1]
+  arrowTarget = t
+  local c = ColorFor(t.who)
+  arrow.tex:SetVertexColor(c[1], c[2], c[3])
+  arrow.who:SetText(t.who .. (#list > 1 and string.format(" |cffaaaaaa(%d/%d)|r", (arrowSkip % #list) + 1, #list) or ""))
+  arrow.who:SetTextColor(c[1], c[2], c[3])
+  arrow.quest:SetText("|cffffd100" .. t.q.title .. "|r")
+  if t.d < 15 then
+    arrow.dist:SetText("|cff4dff4dYou're there|r")
+    arrow.tex:SetRotation(0)
+  else
+    arrow.dist:SetText(string.format("%d yds", t.d))
+    local angle = math.atan2(-t.dxE, -t.dyS)          -- 0 = north, counter-clockwise like GetPlayerFacing
+    arrow.tex:SetRotation(angle - (GetPlayerFacing and GetPlayerFacing() or 0))
+  end
+  arrow:Show()
+end)
+
+------------------------------------------------------------------------
 -- Native-style floating tracker (looks like Blizzard's quest tracker)
 ------------------------------------------------------------------------
 local trk = CreateFrame("Frame", "QuestMatesTracker", UIParent)
@@ -1124,6 +1257,8 @@ ev:RegisterEvent("QUEST_LOG_UPDATE")
 ev:RegisterEvent("UNIT_QUEST_LOG_CHANGED")
 ev:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 ev:RegisterEvent("CHAT_MSG_ADDON")
+ev:RegisterEvent("QUEST_WATCH_LIST_CHANGED")
+ev:RegisterEvent("QUEST_WATCH_UPDATE")
 
 local lastGroupSize = 0
 ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
@@ -1138,6 +1273,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.alerts == nil then db.alerts = true end
     if db.itemAlerts == nil then db.itemAlerts = true end
     if db.combatWarn == nil then db.combatWarn = true end
+    if db.pointer == nil then db.pointer = true end
     if not db.stackDefaulted then db.buttonStyle = "stack"; db.stackDefaulted = true end
     db.panelStyle = db.panelStyle or "inside"
     db.trackerStyle = db.trackerStyle or "native"
@@ -1177,6 +1313,8 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
   elseif e == "QUEST_LOG_UPDATE" or (e == "UNIT_QUEST_LOG_CHANGED" and a1 == "player") then
     ScheduleBroadcast(false, 1.5)
     C_Timer.After(1.6, RefreshAll) -- shared-quest highlights follow my own log
+  elseif e == "QUEST_WATCH_LIST_CHANGED" or e == "QUEST_WATCH_UPDATE" then
+    ScheduleBroadcast(false, 0.5)
   elseif e == "ZONE_CHANGED_NEW_AREA" then
     ScheduleBroadcast(false, 2)
   elseif e == "CHAT_MSG_ADDON" then
@@ -1340,6 +1478,7 @@ MakeOptions = function()
   check("Alert when a friend picks up the same quest", function() return db.alerts end, function(v) db.alerts = v end)
   check("Chat message when a friend loots a quest item", function() return db.itemAlerts end, function(v) db.itemAlerts = v end)
   check("Warn when I pull a quest mob a friend doesn't have the quest for", function() return db.combatWarn end, function(v) db.combatWarn = v end)
+  check("Arrow pointing to quests my friends track", function() return db.pointer end, function(v) db.pointer = v end)
   check("Stamp quest links in chat (done / in log)", function() return not (db.stamp and db.stamp.enabled == false) end,
     function(v) db.stamp = db.stamp or {}; db.stamp.enabled = v end)
 
@@ -1422,6 +1561,9 @@ SlashCmdList.QUESTMATES = function(msg)
       local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
       Print(string.format("  %s: %d quests received", who, c))
     end
+  elseif msg == "pointer" or msg == "arrow" then
+    db.pointer = not db.pointer
+    Print("Friend quest arrow " .. (db.pointer and "on" or "off"))
   elseif msg == "tracker" then
     db.listShown = not db.listShown; RefreshList()
     Print("Floating tracker " .. (db.listShown and "on" or "off"))
@@ -1430,6 +1572,6 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm options - settings window | /qm tracker | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm options - settings window | /qm tracker | /qm arrow | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

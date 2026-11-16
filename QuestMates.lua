@@ -989,11 +989,23 @@ local function PlayerOnMap(pm, px, py, target)
   return x, y
 end
 
+local sizeCache = {}
 local function MapSize(m)
-  if C_Map.GetMapWorldSize then
-    local w, h = C_Map.GetMapWorldSize(m)
-    if w and w > 0 then return w, h end
+  if sizeCache[m] then return sizeCache[m][1], sizeCache[m][2] end
+  local w, h
+  if C_Map.GetMapWorldSize then w, h = C_Map.GetMapWorldSize(m) end
+  if not (w and w > 0) and C_Map.GetWorldPosFromMapPos and CreateVector2D then
+    -- measure the map by converting two corners to world yards
+    local _, a = C_Map.GetWorldPosFromMapPos(m, CreateVector2D(0, 0))
+    local _, b = C_Map.GetWorldPosFromMapPos(m, CreateVector2D(1, 1))
+    if a and b then
+      local ax, ay = a.x, a.y; if a.GetXY then ax, ay = a:GetXY() end
+      local bx, by = b.x, b.y; if b.GetXY then bx, by = b:GetXY() end
+      -- world axes are swapped vs map axes; the sizes are the absolute differences
+      w, h = math.abs(ay - by), math.abs(ax - bx)
+    end
   end
+  if w and w > 0 and h and h > 0 then sizeCache[m] = { w, h }; return w, h end
 end
 
 local function ArrowTargets()
@@ -1568,6 +1580,21 @@ SlashCmdList.QUESTMATES = function(msg)
       local c = 0; for _ in pairs(fr.quests) do c = c + 1 end
       Print(string.format("  %s: %d quests received", who, c))
     end
+  elseif msg == "arrow debug" then
+    local pm, px, py = PlayerPos()
+    Print(string.format("Arrow %s, you on map %s, in group: %s, instance: %s", db.pointer and "on" or "off",
+      tostring(pm), tostring(Channel()), tostring(IsInInstance and IsInInstance())))
+    Print("Map size API: " .. tostring(C_Map.GetMapWorldSize ~= nil) .. ", your map size: " .. tostring(pm and MapSize(pm)))
+    local mine = 0; for _, q in pairs(myQuests) do if q.tracked then mine = mine + 1 end end
+    Print("You are tracking " .. mine .. " quest(s) (sent to friends)")
+    local members = GroupMembers()
+    for who, fr in pairs(friends) do
+      local n, withPts = 0, 0
+      for _, q in pairs(fr.quests) do if q.tracked then n = n + 1; if #(q.pois or {}) > 0 then withPts = withPts + 1 end end end
+      Print(string.format("  %s: in group %s, synced %s, tracking %d (with map spots %d)", who,
+        tostring(members[who] ~= nil), tostring(fr.synced), n, withPts))
+    end
+    Print("Arrow targets right now: " .. #ArrowTargets())
   elseif msg == "pointer" or msg == "arrow" then
     db.pointer = not db.pointer
     Print("Friend quest arrow " .. (db.pointer and "on" or "off"))

@@ -177,10 +177,20 @@ local function AddProgressPin(qid)
   while #list > 6 do table.remove(list, 1) end
 end
 
+-- any of the game's "is this quest tracked" checks counts (different clients answer different ones)
 local function IsTracked(qid, logIndex)
-  if C_QuestLog and C_QuestLog.GetQuestWatchType then return C_QuestLog.GetQuestWatchType(qid) ~= nil end
-  if C_QuestLog and C_QuestLog.IsQuestWatched then return C_QuestLog.IsQuestWatched(qid) and true or false end
-  if IsQuestWatched and logIndex then return IsQuestWatched(logIndex) and true or false end
+  if C_QuestLog and C_QuestLog.GetQuestWatchType then
+    local ok, w = pcall(C_QuestLog.GetQuestWatchType, qid); if ok and w ~= nil then return true end
+  end
+  if C_QuestLog and C_QuestLog.IsQuestWatched then
+    local ok, w = pcall(C_QuestLog.IsQuestWatched, qid); if ok and w then return true end
+  end
+  if IsQuestWatched and logIndex then
+    local ok, w = pcall(IsQuestWatched, logIndex); if ok and w then return true end
+  end
+  if QuestLedgerForever_IsWatched then
+    local ok, w = pcall(QuestLedgerForever_IsWatched, qid, logIndex); if ok and w then return true end
+  end
   return false
 end
 
@@ -309,6 +319,31 @@ local function ScheduleBroadcast(force, delay)
     Broadcast(f)
   end)
 end
+
+-- Tracking a quest doesn't always fire an event, so check the tracked list every 2 seconds
+local lastTracked = ""
+local trackPoll = CreateFrame("Frame")
+local trackAcc = 0
+trackPoll:SetScript("OnUpdate", function(_, el)
+  trackAcc = trackAcc + el
+  if trackAcc < 2 then return end
+  trackAcc = 0
+  if not db or not Channel() then return end
+  local ids = {}
+  local n = (C_QuestLog and C_QuestLog.GetNumQuestLogEntries and C_QuestLog.GetNumQuestLogEntries()) or (GetNumQuestLogEntries and GetNumQuestLogEntries()) or 0
+  for i = 1, n do
+    local qid
+    if C_QuestLog and C_QuestLog.GetInfo then
+      local info = C_QuestLog.GetInfo(i); if info and not info.isHeader then qid = info.questID end
+    elseif GetQuestLogTitle then
+      local _, _, _, isHeader, _, _, _, id = GetQuestLogTitle(i); if not isHeader then qid = id end
+    end
+    if qid and IsTracked(qid, i) then ids[#ids + 1] = qid end
+  end
+  table.sort(ids)
+  local sig = table.concat(ids, ",")
+  if sig ~= lastTracked then lastTracked = sig; ScheduleBroadcast(false, 0.2) end
+end)
 
 local function Split(s, sep)
   local out = {}
@@ -1075,15 +1110,20 @@ local function MarkerTo(t)
   local key = t.who .. ":" .. t.q.id .. ":" .. p.m .. ":" .. string.format("%.3f,%.3f", p.x, p.y)
   if key ~= mk.key then
     mk.key = key
-    if C_Map.CanSetUserWaypointOnMap and not C_Map.CanSetUserWaypointOnMap(p.m) then mk.owned = false; return end
+    mk.failed = false
+    if C_Map.CanSetUserWaypointOnMap and not C_Map.CanSetUserWaypointOnMap(p.m) then mk.owned = false; mk.failed = true; return false end
     local ok = pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(p.m, p.x, p.y))
     if ok then
       pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
       if SetCVar and GetCVar and GetCVar("showInGameNavigation") ~= "1" then pcall(SetCVar, "showInGameNavigation", "1") end
       mk.owned = true
+    else
+      mk.failed = true
     end
   end
+  if mk.failed then return false end
   MarkerColor()
+  return true
 end
 if SuperTrackedFrame then
   SuperTrackedFrame:HookScript("OnUpdate", function() if mk.owned then MarkerColor() end end)
@@ -1111,11 +1151,11 @@ arrow.driver:SetScript("OnUpdate", function(_, el)
   local t = list[(arrowSkip % #list) + 1]
   arrowTarget = t
   if db.arrowStyle ~= "classic" and MarkerSupported() then
-    arrow:Hide()
-    MarkerTo(t)
-    return
+    if MarkerTo(t) then arrow:Hide(); return end
+    -- the game won't put its marker on that map: use the arrow for this one instead
+  else
+    MarkerClear()
   end
-  MarkerClear()
   local c = ColorFor(t.who)
   arrow.tex:SetVertexColor(c[1], c[2], c[3])
   arrow.who:SetText(t.who .. (#list > 1 and string.format(" |cffaaaaaa(%d/%d)|r", (arrowSkip % #list) + 1, #list) or ""))

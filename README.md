@@ -6,6 +6,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 
 ## Features
 - Friends' quest areas on the world map as colored dots with their initial (**?** when ready to turn in)
+- Friends' quest areas shaded on the map like your own (game's quest area where available, plus a glow in their color)
 - Small dots where friends made quest progress
 - Gold ring and gold text for quests you share
 - QuestMates button in the Map & Quest Log title bar: swaps your quest list for your group's quests (collapsible per friend, hover for objectives)
@@ -31,6 +32,7 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 | `/qm arrow next` | Point to the next friend quest |
 | `/qm tracker` | Floating tracker on/off |
 | `/qm map` | Map markers on/off |
+| `/qm areas` | Friend quest area shading on/off |
 | `/qm shared` | Shared-quest highlight on/off |
 | `/qm progress` | Progress dots on/off |
 | `/qm alert` | Same-quest alerts on/off |

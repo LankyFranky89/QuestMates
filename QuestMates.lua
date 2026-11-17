@@ -446,6 +446,33 @@ end
 ------------------------------------------------------------------------
 local pins = {}
 
+-- Globus (borderless zoomable map): returns its visible map frame, or nil when Globus isn't loaded
+local function GlobusFrame()
+  if type(Globus_GetMapFrame) ~= "function" then return nil end
+  local ok, fr = pcall(Globus_GetMapFrame)
+  if ok then return fr end
+end
+
+-- Keep dots the same size on screen at any zoom (like the game's own quest icons):
+-- the map canvas grows when you zoom, so the dots shrink by the same amount.
+local function PinScale(child)
+  local cur = child and child:GetScale() or 1
+  if not cur or cur <= 0 then return 1 end
+  local base = cur
+  local sc = WorldMapFrame and WorldMapFrame.ScrollContainer
+  if sc and sc.GetScaleForMinZoom then
+    local ok, v = pcall(sc.GetScaleForMinZoom, sc)
+    if ok and type(v) == "number" and v > 0 then base = v end
+  end
+  return base / cur
+end
+local function PlacePin(p, child)
+  local inv = PinScale(child)
+  p:SetScale(inv)
+  p:ClearAllPoints()
+  p:SetPoint("CENTER", child, "TOPLEFT", p.nx * child:GetWidth() / inv, -p.ny * child:GetHeight() / inv)
+end
+
 local function Project(m, x, y, viewMap)
   if m == viewMap then return x, y end
   if not (C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D) then return nil end
@@ -497,13 +524,85 @@ local function GetPin(i, parent)
   return p
 end
 
+-- Quest areas: the game's own shaded quest area ("blob"), like your own quests get,
+-- plus a soft glow in the friend's color so the area shows even when the game has no shape for it.
+local blob, halos, haloHolder = nil, {}, nil
+local function GetHalo(i, child)
+  -- textures live on their own frame just above the map tiles (tiles are frames, so a plain
+  -- texture on the canvas would be drawn underneath them)
+  if not haloHolder then haloHolder = CreateFrame("Frame", nil, child) end
+  if haloHolder:GetParent() ~= child then haloHolder:SetParent(child) end
+  haloHolder:ClearAllPoints(); haloHolder:SetAllPoints(child)
+  haloHolder:SetFrameLevel(child:GetFrameLevel() + 1990)
+  local t = halos[i]
+  if not t then
+    t = haloHolder:CreateTexture(nil, "ARTWORK")
+    t:SetTexture(MEDIA .. "Disc")
+    t:SetBlendMode("BLEND")
+    halos[i] = t
+  end
+  return t
+end
+local function DrawAreas(child, viewMap, areas)
+  for _, t in ipairs(halos) do t:Hide() end
+  if blob then pcall(blob.DrawNone, blob) end
+  if db.areas == false then return end
+  local w, h = child:GetWidth(), child:GetHeight()
+  -- game-drawn quest areas (works for quests the game has area data for)
+  if not blob and type(CreateFrame) == "function" then
+    local ok, f = pcall(CreateFrame, "QuestPOIFrame", nil, child)
+    if ok and f then
+      blob = f
+      pcall(f.SetFillTexture, f, "Interface\\WorldMap\\UI-QuestBlob-Inside")
+      pcall(f.SetBorderTexture, f, "Interface\\WorldMap\\UI-QuestBlob-Outside")
+      pcall(f.SetFillAlpha, f, 128); pcall(f.SetBorderAlpha, f, 192); pcall(f.SetBorderScalar, f, 1.0)
+    else
+      blob = false
+    end
+  end
+  if blob then
+    blob:SetParent(child); blob:ClearAllPoints(); blob:SetAllPoints(child)
+    blob:SetFrameLevel(child:GetFrameLevel() + 2000)
+    pcall(blob.SetMapID, blob, viewMap)
+    local drawn = {}
+    for _, a in ipairs(areas) do
+      if not drawn[a.q.id] and not myQuests[a.q.id] then  -- yours already get drawn by the game
+        drawn[a.q.id] = true
+        pcall(blob.DrawBlob, blob, a.q.id, true)
+      end
+    end
+    blob:Show()
+  end
+  -- friend-colored glow over each area, sized to cover where they've made progress
+  for i, a in ipairs(areas) do
+    local t = GetHalo(i, child)
+    local c = ColorFor(a.who)
+    local r = 0.045 * w
+    for _, pt in ipairs(a.prog or {}) do
+      local d = math.sqrt(((pt.x - a.x) * w) ^ 2 + ((pt.y - a.y) * h) ^ 2)
+      if d < 0.2 * w then r = math.max(r, d + 0.015 * w) end
+    end
+    t:SetVertexColor(c[1], c[2], c[3], 0.22)
+    t:SetSize(r * 2, r * 2)
+    t:ClearAllPoints()
+    t:SetPoint("CENTER", child, "TOPLEFT", a.x * w, -a.y * h)
+    t:Show()
+  end
+end
+
 local function RefreshPins()
   for _, p in ipairs(pins) do p:Hide() end
-  if not db or not db.mapPins or not WorldMapFrame or not WorldMapFrame:IsShown() then return end
+  if not db or not db.mapPins or not WorldMapFrame or not WorldMapFrame:IsShown() then
+    for _, t in ipairs(halos) do t:Hide() end
+    if blob then pcall(blob.DrawNone, blob) end
+    return
+  end
   local viewMap = WorldMapFrame:GetMapID()
   local child = WorldMapFrame.ScrollContainer and WorldMapFrame.ScrollContainer.Child
   if not viewMap or not child then return end
+  local areas = {}
   local w, h = child:GetWidth(), child:GetHeight()
+  local zs = 1 / PinScale(child) -- dots closer than 12 px on screen merge into one
   local members = GroupMembers()
   local i = 0
   local function place(who, list, x, y, isProgress)
@@ -524,8 +623,8 @@ local function RefreshPins()
     elseif allDone then p.txt:SetText("?")
     else p.txt:SetText(who:sub(1, 1):upper()) end
     p:SetFrameLevel(child:GetFrameLevel() + 2100)
-    p:ClearAllPoints()
-    p:SetPoint("CENTER", child, "TOPLEFT", x * w, -y * h)
+    p.nx, p.ny = x, y
+    PlacePin(p, child)
     p:Show()
   end
   for who, fr in pairs(friends) do
@@ -534,12 +633,18 @@ local function RefreshPins()
       local spots = {}
       local prog = {}
       for _, q in pairs(fr.quests) do
+        local qprog = {}
+        for _, pt in ipairs(q.pins or {}) do
+          local x, y = Project(pt.m, pt.x, pt.y, viewMap)
+          if x then qprog[#qprog + 1] = { x = x, y = y } end
+        end
         for _, pt in ipairs(q.pois) do
           local x, y = Project(pt.m, pt.x, pt.y, viewMap)
+          if x and not q.complete then areas[#areas + 1] = { who = who, q = q, x = x, y = y, prog = qprog } end
           if x then
             local merged
             for _, s in ipairs(spots) do
-              if math.abs((s.x - x) * w) < 12 and math.abs((s.y - y) * h) < 12 then
+              if math.abs((s.x - x) * w) * zs < 12 and math.abs((s.y - y) * h) * zs < 12 then
                 s.list[#s.list + 1] = q; merged = true; break
               end
             end
@@ -557,6 +662,7 @@ local function RefreshPins()
       for _, s in ipairs(spots) do place(who, s.list, s.x, s.y, false) end
     end
   end
+  DrawAreas(child, viewMap, areas)
 end
 
 ------------------------------------------------------------------------
@@ -664,9 +770,11 @@ local function AnchorPanel()
     panel:SetAllPoints(q)            -- sits on top of your quest list
     panel.inMap = true
   else                                -- map minimized / quest list hidden: show beside the map
+    local edge = GlobusFrame() or WorldMapFrame
+    local gap = (edge == WorldMapFrame) and -2 or 2
     panel:SetWidth(300)
-    panel:SetPoint("TOPLEFT", WorldMapFrame, "TOPRIGHT", -2, 0)
-    panel:SetPoint("BOTTOMLEFT", WorldMapFrame, "BOTTOMRIGHT", -2, 0)
+    panel:SetPoint("TOPLEFT", edge, "TOPRIGHT", gap, 0)
+    panel:SetPoint("BOTTOMLEFT", edge, "BOTTOMRIGHT", gap, 0)
     panel.inMap = false
   end
   -- one strata above the map so the quest log's own scroll lists can never draw on top
@@ -734,7 +842,16 @@ local function MakePanel()
   b.Reanchor = function(self)
     self:ClearAllPoints()
     local toggle = FindQuestToggle()
-    if (db.buttonStyle == "stack" or db.buttonStyle == nil) and toggle then  -- stacked above the map's quest-log "?" toggle
+    local globus = GlobusFrame()
+    if globus then                             -- Globus map: small icon in its top-left corner
+      self.icon:Show(); self.inner:Hide(); self.q:Hide()
+      self.edge:Show(); if self.nat then for _, t in pairs(self.nat) do t:Hide() end end
+      self:SetParent(globus)
+      self:SetSize(24, 24)
+      self:SetPoint("TOPLEFT", globus, "TOPLEFT", 6, -20) -- under the move bar, clear of other addons' map buttons
+      self:SetFrameStrata(globus:GetFrameStrata())
+      self:SetFrameLevel(globus:GetFrameLevel() + 30)
+    elseif (db.buttonStyle == "stack" or db.buttonStyle == nil) and toggle then  -- stacked above the map's quest-log "?" toggle
       self:SetParent(toggle:GetParent() or WorldMapFrame)
       local w, h = toggle:GetSize()
       self:SetSize(w > 0 and w or 32, h > 0 and h or 32)
@@ -818,13 +935,21 @@ local function MakePanel()
   b.badge = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
   b.badge:SetPoint("BOTTOMRIGHT", 2, -2)
   b:SetScript("OnClick", function()
+    -- Globus + Quest Ledger: the group list is the Ledger's party view, docked beside the map
+    if GlobusFrame() and QuestLedgerForever_ToggleParty then
+      pcall(QuestLedgerForever_ToggleParty)
+      RefreshList()
+      return
+    end
     db.panelOpen = not db.panelOpen
     RefreshList()
   end)
   b:SetScript("OnEnter", function(s)
     GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
     GameTooltip:AddLine("QuestMates")
-    GameTooltip:AddLine(db.panelOpen and "Back to your quests" or "Show your group's quests", 1, 1, 1)
+    local open = db.panelOpen
+    if GlobusFrame() and QuestLedgerForever_IsPartyShown then open = QuestLedgerForever_IsPartyShown() end
+    GameTooltip:AddLine(open and "Back to your quests" or "Show your group's quests", 1, 1, 1)
     GameTooltip:Show()
   end)
   b:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -867,8 +992,20 @@ end
 local function RefreshPanel()
   if not panel then return end
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
-  -- Quest Ledger Forever "pure map": no quest-log elements on the map (pins stay)
-  if QuestLedgerForever_IsPureMap and QuestLedgerForever_IsPureMap() then
+  local globus = GlobusFrame()
+  local ledger = QuestLedgerForever_ToggleParty ~= nil
+  -- Globus + Quest Ledger: corner icon opens the Ledger's party view beside the map
+  if globus and ledger then
+    panel:Hide()
+    tab:SetShown(mapOpen and db.dock ~= false)
+    local _, n = BuildRows()
+    tab.badge:SetText(n > 0 and n or "")
+    tab.on:SetShown(QuestLedgerForever_IsPartyShown and QuestLedgerForever_IsPartyShown() or false)
+    tab:Reanchor()
+    return
+  end
+  -- Quest Ledger Forever without Globus: no quest-log elements on the map (pins stay)
+  if not globus and QuestLedgerForever_IsPureMap and QuestLedgerForever_IsPureMap() then
     tab:Hide(); panel:Hide(); return
   end
   tab:SetShown(mapOpen and db.dock ~= false)
@@ -1418,6 +1555,17 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
       WorldMapFrame:HookScript("OnShow", function() C_Timer.After(0, RefreshList) end)
       WorldMapFrame:HookScript("OnHide", function() C_Timer.After(0, RefreshList) end)
       WorldMapFrame:HookScript("OnShow", RefreshPins)
+      -- zooming (Globus or the game's own zoom): re-size and re-place the dots
+      local child = WorldMapFrame.ScrollContainer and WorldMapFrame.ScrollContainer.Child
+      if child then
+        local watch, lastScale = CreateFrame("Frame", nil, WorldMapFrame), nil
+        watch:SetScript("OnUpdate", function()
+          local sc = child:GetScale()
+          if sc == lastScale then return end
+          lastScale = sc
+          for _, p in ipairs(pins) do if p:IsShown() and p.nx then PlacePin(p, child) end end
+        end)
+      end
       if WorldMapFrame.OnMapChanged then hooksecurefunc(WorldMapFrame, "OnMapChanged", RefreshPins) end
       WorldMapFrame:HookScript("OnSizeChanged", function() C_Timer.After(0, RefreshAll) end)
       if WorldMapFrame.Maximize then hooksecurefunc(WorldMapFrame, "Maximize", function() C_Timer.After(0, RefreshAll) end) end
@@ -1605,6 +1753,7 @@ MakeOptions = function()
   check("Friends' quest areas on the map", function() return db.mapPins end, function(v) db.mapPins = v end)
   check("Highlight quests we share (gold)", function() return db.highlightShared ~= false end, function(v) db.highlightShared = v end)
   check("Spots where friends made progress", function() return db.progressPins end, function(v) db.progressPins = v end)
+  check("Shade friends' quest areas", function() return db.areas ~= false end, function(v) db.areas = v end)
   y = y - 6
   header("Floating tracker")
   check("Show the floating tracker when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
@@ -1657,6 +1806,9 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "map" then
     db.mapPins = not db.mapPins; RefreshPins()
     Print("Map markers " .. (db.mapPins and "on" or "off"))
+  elseif msg == "areas" then
+    db.areas = (db.areas == false); RefreshPins()
+    Print("Friend quest areas " .. (db.areas ~= false and "on" or "off"))
   elseif msg == "shared" then
     db.highlightShared = not db.highlightShared; RefreshAll()
     Print("Shared quest highlight " .. (db.highlightShared and "on" or "off"))

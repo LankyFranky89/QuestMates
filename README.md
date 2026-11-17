@@ -14,7 +14,7 @@ A World of Warcraft (WoW Forever) addon that shows your party's quests on the wo
 - Alert + sound when a friend picks up the same quest as you
 - Chat message whenever a friend loots a quest item
 - Points to the nearest quest a friend is tracking with the game's own in-world marker, in the friend's color (classic arrow style in options)
-- Warning when you pull a named quest mob (rare, elite, boss, or a quest needing just that one) and a party member doesn't have that quest
+- Warning when you pull a named quest mob (rare, elite, boss, or a quest needing just that one; off inside dungeons) and a party member doesn't have that quest
 - Quest links in chat get a stamp: green check = done, yellow **?** = in your log (formerly the QuestStamp addon)
 
 **Everyone in the group needs QuestMates installed.**

@@ -1015,10 +1015,10 @@ end
 local function PlayerOnMap(pm, px, py, target)
   if pm == target then return px, py end
   if not (C_Map.GetWorldPosFromMapPos and C_Map.GetMapPosFromWorldPos and CreateVector2D) then return end
-  local cont, world = C_Map.GetWorldPosFromMapPos(pm, CreateVector2D(px, py))
-  if not (cont and world) then return end
-  local _, pos = C_Map.GetMapPosFromWorldPos(cont, world, target)
-  if not pos then return end
+  local ok, cont, world = pcall(C_Map.GetWorldPosFromMapPos, pm, CreateVector2D(px, py))
+  if not (ok and cont and world) then return end
+  local ok2, _, pos = pcall(C_Map.GetMapPosFromWorldPos, cont, world, target)
+  if not (ok2 and pos) then return end
   local x, y = pos.x, pos.y
   if pos.GetXY then x, y = pos:GetXY() end
   return x, y
@@ -1028,12 +1028,14 @@ local sizeCache = {}
 local function MapSize(m)
   if sizeCache[m] then return sizeCache[m][1], sizeCache[m][2] end
   local w, h
-  if C_Map.GetMapWorldSize then w, h = C_Map.GetMapWorldSize(m) end
+  if C_Map.GetMapWorldSize then
+    local ok, mw, mh = pcall(C_Map.GetMapWorldSize, m); if ok then w, h = mw, mh end
+  end
   if not (w and w > 0) and C_Map.GetWorldPosFromMapPos and CreateVector2D then
     -- measure the map by converting two corners to world yards
-    local _, a = C_Map.GetWorldPosFromMapPos(m, CreateVector2D(0, 0))
-    local _, b = C_Map.GetWorldPosFromMapPos(m, CreateVector2D(1, 1))
-    if a and b then
+    local ok1, _, a = pcall(C_Map.GetWorldPosFromMapPos, m, CreateVector2D(0, 0))
+    local ok2, _, b = pcall(C_Map.GetWorldPosFromMapPos, m, CreateVector2D(1, 1))
+    if ok1 and ok2 and a and b then
       local ax, ay = a.x, a.y; if a.GetXY then ax, ay = a:GetXY() end
       local bx, by = b.x, b.y; if b.GetXY then bx, by = b:GetXY() end
       -- world axes are swapped vs map axes; the sizes are the absolute differences
@@ -1111,7 +1113,9 @@ local function MarkerTo(t)
   if key ~= mk.key then
     mk.key = key
     mk.failed = false
-    if C_Map.CanSetUserWaypointOnMap and not C_Map.CanSetUserWaypointOnMap(p.m) then mk.owned = false; mk.failed = true; return false end
+    local okCan, can = true, true
+    if C_Map.CanSetUserWaypointOnMap then okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, p.m) end
+    if not (okCan and can) then mk.owned = false; mk.failed = true; return false end
     local ok = pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(p.m, p.x, p.y))
     if ok then
       pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
@@ -1504,6 +1508,7 @@ end
 local warned = {} -- [guid..qid] = true
 local function CheckPull()
   if not db or db.combatWarn == false or not Channel() then return end
+  if IsInInstance and IsInInstance() then return end   -- off in dungeons/raids (every mob is elite there)
   local unit = "target"
   if not UnitExists(unit) or not UnitAffectingCombat(unit) then
     if UnitExists("mouseover") and UnitCanAttack("player", "mouseover") then unit = "mouseover" else return end
@@ -1527,9 +1532,9 @@ local function CheckPull()
         Print("|cffff5555Heads up:|r " .. names .. " " .. (#missing == 1 and "doesn't" or "don't")
           .. " have |cffffd100" .. q.title .. "|r")
         if RaidNotice_AddMessage and RaidWarningFrame then
-          RaidNotice_AddMessage(RaidWarningFrame, names .. " missing: " .. q.title, ChatTypeInfo["RAID_WARNING"])
+          pcall(RaidNotice_AddMessage, RaidWarningFrame, names .. " missing: " .. q.title, ChatTypeInfo and ChatTypeInfo["RAID_WARNING"] or { r = 1, g = 1, b = 1 })
         end
-        if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
+        if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then pcall(PlaySound, SOUNDKIT.RAID_WARNING) end
       end
     end
   end
@@ -1577,7 +1582,8 @@ MakeOptions = function()
   local function choice(label, key, opts)
     local l = p:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     l:SetPoint("TOPLEFT", 20, y - 4); l:SetText(label)
-    local x = 200
+    y = y - 22
+    local x = 36
     for _, o in ipairs(opts) do
       local rb = CreateFrame("CheckButton", nil, p, "UIRadioButtonTemplate")
       rb:SetPoint("TOPLEFT", x, y - 2)
@@ -1668,7 +1674,7 @@ SlashCmdList.QUESTMATES = function(msg)
     Print("Missing-quest pull warning " .. (db.combatWarn and "on" or "off"))
   elseif msg == "dock" then
     db.dock = (db.dock == false); RefreshList()
-    Print("Map title-bar button " .. (db.dock ~= false and "on" or "off"))
+    Print("Map button " .. (db.dock ~= false and "on" or "off"))
   elseif msg:match("^scale") then
     local v = tonumber(msg:match("^scale%s+([%d%.]+)"))
     if v and v >= 0.5 and v <= 2.5 then db.scale = v; RefreshList(); Print("Size set to " .. v)
@@ -1720,6 +1726,6 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "clear" then
     wipe(cdb.pins); ScheduleBroadcast(true, 0.5); Print("Cleared your progress spots.")
   else
-    Print("/qm options - settings window | /qm tracker | /qm arrow | /qm - show/hide the floating list (or the QuestMates button in the map title bar) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
+    Print("/qm options - settings window | /qm tracker | /qm arrow | /qm - show/hide the floating list (or the QuestMates button on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end

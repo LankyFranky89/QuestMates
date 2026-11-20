@@ -218,7 +218,12 @@ local function ScanLog()
     for i = 1, n do
       local info = C_QuestLog.GetInfo(i)
       if info and not info.isHeader and info.questID then
-        local complete = C_QuestLog.IsComplete and C_QuestLog.IsComplete(info.questID)
+        local complete = (info.isComplete == 1 or info.isComplete == true)
+        if not complete and C_QuestLog.IsComplete and C_QuestLog.IsComplete(info.questID) then
+          -- the game says "complete" for quests with nothing to count (talk-to / explore): only trust it when there are objectives
+          local objs = Objectives(info.questID, i)
+          if #objs > 0 then complete = true end
+        end
         add(info.questID, info.title, info.level, complete, i)
       end
     end
@@ -513,6 +518,11 @@ local function GetPin(i, parent)
     p = CreateFrame("Button", nil, parent)
     p.ring = p:CreateTexture(nil, "ARTWORK", nil, 1)
     p.ring:SetTexture(MEDIA .. "Ring"); p.ring:SetPoint("CENTER"); p.ring:SetVertexColor(GOLD[1], GOLD[2], GOLD[3])
+    -- quest-icon look like the game's own: dark disc, colored rim, colored center with "?"
+    p.back = p:CreateTexture(nil, "BACKGROUND")
+    p.back:SetTexture(MEDIA .. "Disc"); p.back:SetPoint("CENTER"); p.back:SetVertexColor(0.16, 0.09, 0.05, 1); p.back:Hide()
+    p.rim = p:CreateTexture(nil, "BORDER")
+    p.rim:SetTexture(MEDIA .. "Ring"); p.rim:SetPoint("CENTER"); p.rim:Hide()
     p.disc = p:CreateTexture(nil, "ARTWORK", nil, 2)
     p.disc:SetTexture(MEDIA .. "Disc"); p.disc:SetAllPoints()
     p.txt = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -524,145 +534,172 @@ local function GetPin(i, parent)
   return p
 end
 
--- Quest areas: the game's own shaded quest area ("blob"), like your own quests get,
--- plus a soft glow in the friend's color so the area shows even when the game has no shape for it.
-local blob, halos, haloHolder = nil, {}, nil
-local function GetHalo(i, child)
-  -- textures live on their own frame just above the map tiles (tiles are frames, so a plain
-  -- texture on the canvas would be drawn underneath them)
-  if not haloHolder then haloHolder = CreateFrame("Frame", nil, child) end
-  if haloHolder:GetParent() ~= child then haloHolder:SetParent(child) end
-  haloHolder:ClearAllPoints(); haloHolder:SetAllPoints(child)
-  haloHolder:SetFrameLevel(child:GetFrameLevel() + 1990)
-  local t = halos[i]
+-- Friends' quest areas: a soft glowing area in the friend's color (like the game's own blue
+-- quest area), shaped around their quest spots and the spots where they made progress.
+-- The game only gives the exact shape for quests in your own log, so this is built from points.
+local blobFrame, discs, hits = nil, {}, {}
+local AREA_R = 0.045 -- area radius, as part of the map's width
+
+local function BlobLevel(child)
+  -- just under the game's own map icons (quest icons, you, your group), above the map art
+  local low
+  for _, c in ipairs({ child:GetChildren() }) do
+    local t = c.pinTemplate and tostring(c.pinTemplate)
+    if t and not t:find("Exploration", 1, true) and not t:find("FogOfWar", 1, true) and c:IsShown() then
+      local lv = c:GetFrameLevel()
+      if not low or lv < low then low = lv end
+    end
+  end
+  local terrain = _G.GlobusTerrain
+  local floor = (terrain and terrain:GetFrameLevel() or child:GetFrameLevel()) + 1
+  if low and low - 1 >= floor then return low - 1 end
+  return floor
+end
+
+local function Disc(i)
+  local t = discs[i]
   if not t then
-    t = haloHolder:CreateTexture(nil, "ARTWORK")
-    t:SetTexture(MEDIA .. "Disc")
-    t:SetBlendMode("BLEND")
-    halos[i] = t
+    t = blobFrame:CreateTexture(nil, "ARTWORK")
+    t:SetTexture(MEDIA .. "SoftDisc")
+    discs[i] = t
   end
   return t
 end
-local function DrawAreas(child, viewMap, areas)
-  for _, t in ipairs(halos) do t:Hide() end
-  if blob then pcall(blob.DrawNone, blob) end
-  if db.areas == false then return end
-  local w, h = child:GetWidth(), child:GetHeight()
-  -- game-drawn quest areas (works for quests the game has area data for)
-  if not blob and type(CreateFrame) == "function" then
-    local ok, f = pcall(CreateFrame, "QuestPOIFrame", nil, child)
-    if ok and f then
-      blob = f
-      pcall(f.SetFillTexture, f, "Interface\\WorldMap\\UI-QuestBlob-Inside")
-      pcall(f.SetBorderTexture, f, "Interface\\WorldMap\\UI-QuestBlob-Outside")
-      pcall(f.SetFillAlpha, f, 128); pcall(f.SetBorderAlpha, f, 192); pcall(f.SetBorderScalar, f, 1.0)
-    else
-      blob = false
-    end
+
+local function Hit(i, child)
+  local b = hits[i]
+  if not b then
+    b = CreateFrame("Frame", nil, blobFrame)
+    -- hover shows the tooltip, but clicks and drags go straight to the map
+    if b.SetMouseClickEnabled then b:SetMouseClickEnabled(false) end
+    if b.SetMouseMotionEnabled then b:SetMouseMotionEnabled(true) else b:EnableMouse(true) end
+    b:SetScript("OnEnter", ShowPinTooltip)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    hits[i] = b
   end
-  if blob then
-    blob:SetParent(child); blob:ClearAllPoints(); blob:SetAllPoints(child)
-    blob:SetFrameLevel(child:GetFrameLevel() + 2000)
-    pcall(blob.SetMapID, blob, viewMap)
-    local drawn = {}
-    for _, a in ipairs(areas) do
-      if not drawn[a.q.id] and not myQuests[a.q.id] then  -- yours already get drawn by the game
-        drawn[a.q.id] = true
-        pcall(blob.DrawBlob, blob, a.q.id, true)
-      end
-    end
-    blob:Show()
-  end
-  -- friend-colored glow over each area, sized to cover where they've made progress
-  for i, a in ipairs(areas) do
-    local t = GetHalo(i, child)
-    local c = ColorFor(a.who)
-    local r = 0.045 * w
-    for _, pt in ipairs(a.prog or {}) do
-      local d = math.sqrt(((pt.x - a.x) * w) ^ 2 + ((pt.y - a.y) * h) ^ 2)
-      if d < 0.2 * w then r = math.max(r, d + 0.015 * w) end
-    end
-    t:SetVertexColor(c[1], c[2], c[3], 0.22)
-    t:SetSize(r * 2, r * 2)
-    t:ClearAllPoints()
-    t:SetPoint("CENTER", child, "TOPLEFT", a.x * w, -a.y * h)
-    t:Show()
-  end
+  return b
 end
 
 local function RefreshPins()
   for _, p in ipairs(pins) do p:Hide() end
-  if not db or not db.mapPins or not WorldMapFrame or not WorldMapFrame:IsShown() then
-    for _, t in ipairs(halos) do t:Hide() end
-    if blob then pcall(blob.DrawNone, blob) end
-    return
-  end
+  for _, t in ipairs(discs) do t:Hide() end
+  for _, b in ipairs(hits) do b:Hide() end
+  if not db or not db.mapPins or not WorldMapFrame or not WorldMapFrame:IsShown() then return end
   local viewMap = WorldMapFrame:GetMapID()
   local child = WorldMapFrame.ScrollContainer and WorldMapFrame.ScrollContainer.Child
   if not viewMap or not child then return end
-  local areas = {}
+  if not blobFrame then
+    blobFrame = CreateFrame("Frame", "QuestMatesAreas", child)
+    blobFrame:SetAllPoints(child)
+  end
+  blobFrame:SetFrameLevel(BlobLevel(child))
   local w, h = child:GetWidth(), child:GetHeight()
-  local zs = 1 / PinScale(child) -- dots closer than 12 px on screen merge into one
+  local r = AREA_R * w -- in map canvas units: grows and shrinks with zoom like the game's own areas
   local members = GroupMembers()
-  local i = 0
-  local function place(who, list, x, y, isProgress)
-    i = i + 1
-    local p = GetPin(i, child)
-    p.who, p.list, p.isProgress = who, list, isProgress
+  -- areas only on zone maps; on continent and world maps every quest is a small dot
+  local mi = C_Map.GetMapInfo(viewMap)
+  local zoneMap = mi and mi.mapType and mi.mapType >= 3
+  local nd, nh, np = 0, 0, 0
+  -- small dot that keeps its size on screen: "?" = ready to turn in, initial = other quests
+  local function dot(who, q, x, y, label)
+    np = np + 1
+    local p = GetPin(np, child)
+    p.who, p.list, p.isProgress = who, { q }, false
     local c = ColorFor(who)
-    local size = isProgress and 12 or 20
-    p:SetSize(size, size)
-    p.ring:SetSize(size * 1.7, size * 1.7)
-    p.disc:SetVertexColor(c[1], c[2], c[3])
-    local shared = false
-    for _, q in ipairs(list) do if myQuests[q.id] then shared = true end end
-    p.ring:SetShown(shared and db.highlightShared ~= false)
-    local allDone = true
-    for _, q in ipairs(list) do if not q.complete then allDone = false end end
-    if isProgress then p.txt:SetText("")
-    elseif allDone then p.txt:SetText("?")
-    else p.txt:SetText(who:sub(1, 1):upper()) end
+    -- the game's own quest icon (same pictures as your quest icons), recolored in the friend's color
+    if not p.qbg then
+      p.qbg = p:CreateTexture(nil, "ARTWORK", nil, 3)
+      p.qbg:SetPoint("CENTER")
+      p.qicon = p:CreateTexture(nil, "ARTWORK", nil, 4)
+      p.qicon:SetPoint("CENTER")
+    end
+    p:SetSize(20, 20)
+    p.back:Hide(); p.rim:Hide(); p.disc:Hide(); p.txt:SetText("")
+    p.qbg:SetAtlas("UI-QuestPoi-QuestNumber"); p.qbg:SetSize(32, 31)
+    p.qbg:SetDesaturated(true); p.qbg:SetVertexColor(c[1], c[2], c[3]); p.qbg:Show()
+    p.qicon:SetAtlas(label == "?" and "UI-QuestIcon-TurnIn-Normal" or "Quest-In-Progress-Icon-yellow"); p.qicon:SetSize(32, 31)
+    p.qicon:SetDesaturated(true); p.qicon:SetVertexColor(c[1], c[2], c[3]); p.qicon:Show()
+    p.ring:SetSize(36, 36)
+    p.ring:SetShown(myQuests[q.id] and db.highlightShared ~= false or false)
     p:SetFrameLevel(child:GetFrameLevel() + 2100)
     p.nx, p.ny = x, y
     PlacePin(p, child)
     p:Show()
   end
+  local function disc(x, y, c, size, a)
+    nd = nd + 1
+    local t = Disc(nd)
+    t:SetVertexColor(c[1], c[2], c[3], a)
+    t:SetSize(size, size)
+    t:ClearAllPoints()
+    t:SetPoint("CENTER", blobFrame, "TOPLEFT", x * w, -y * h)
+    t:Show()
+  end
   for who, fr in pairs(friends) do
     if members[who] then
-      -- group quest areas that land on the same spot into one pin
-      local spots = {}
-      local prog = {}
+      local c = ColorFor(who)
       for _, q in pairs(fr.quests) do
-        local qprog = {}
-        for _, pt in ipairs(q.pins or {}) do
-          local x, y = Project(pt.m, pt.x, pt.y, viewMap)
-          if x then qprog[#qprog + 1] = { x = x, y = y } end
-        end
+        local pts = {}
         for _, pt in ipairs(q.pois) do
           local x, y = Project(pt.m, pt.x, pt.y, viewMap)
-          if x and not q.complete then areas[#areas + 1] = { who = who, q = q, x = x, y = y, prog = qprog } end
-          if x then
-            local merged
-            for _, s in ipairs(spots) do
-              if math.abs((s.x - x) * w) * zs < 12 and math.abs((s.y - y) * h) * zs < 12 then
-                s.list[#s.list + 1] = q; merged = true; break
-              end
-            end
-            if not merged then spots[#spots + 1] = { x = x, y = y, list = { q } } end
-          end
+          if x then pts[#pts + 1] = { x, y } end
         end
         if db.progressPins ~= false and not q.complete then
           for _, pt in ipairs(q.pins or {}) do
             local x, y = Project(pt.m, pt.x, pt.y, viewMap)
-            if x then prog[#prog + 1] = { x = x, y = y, list = { q } } end
+            if x then pts[#pts + 1] = { x, y } end
+          end
+        end
+        -- kill / loot / use-object objectives still open = an area to roam; anything else = a dot
+        local roam = false
+        if zoneMap and not q.complete then
+          for _, o in ipairs(q.objs or {}) do
+            local t = o.type
+            if not o.done and (t == "monster" or t == "item" or t == "object"
+              or ((t == nil or t == "") and (o.need or 0) > 1)) then roam = true end -- unknown type: "kill 0/8"-style counts
+          end
+        end
+        if #pts > 0 and not roam then
+          local cx, cy = 0, 0
+          local n = 0
+          for _, pt in ipairs(q.pois) do
+            local x, y = Project(pt.m, pt.x, pt.y, viewMap)
+            if x then cx, cy, n = cx + x, cy + y, n + 1 end
+          end
+          if n == 0 then for _, p in ipairs(pts) do cx, cy, n = cx + p[1], cy + p[2], n + 1 end end
+          dot(who, q, cx / n, cy / n, q.complete and "?" or who:sub(1, 1):upper())
+        elseif #pts > 0 then
+          -- center of the area
+          local cx, cy = 0, 0
+          for _, p in ipairs(pts) do cx, cy = cx + p[1], cy + p[2] end
+          cx, cy = cx / #pts, cy / #pts
+          local alpha = 0.38
+          disc(cx, cy, c, r * 2.2, alpha)
+          -- fill from the center out to every spot, so the area covers all of them
+          for _, p in ipairs(pts) do
+            local dx, dy = (p[1] - cx) * w, (p[2] - cy) * h
+            local len = math.sqrt(dx * dx + dy * dy)
+            local steps = math.floor(len / (r * 0.9))
+            for k = 1, steps do
+              local f = k / (steps + 1)
+              disc(cx + (p[1] - cx) * f, cy + (p[2] - cy) * f, c, r * 2, alpha * 0.55)
+            end
+            disc(p[1], p[2], c, r * 2, alpha * 0.7)
+          end
+          -- hover anywhere on the area: who has it and their progress
+          for _, p in ipairs(#pts > 1 and pts or { { cx, cy } }) do
+            nh = nh + 1
+            local b = Hit(nh, child)
+            b.who, b.list, b.isProgress = who, { q }, false
+            b:SetSize(r * 1.6, r * 1.6)
+            b:ClearAllPoints()
+            b:SetPoint("CENTER", blobFrame, "TOPLEFT", p[1] * w, -p[2] * h)
+            b:Show()
           end
         end
       end
-      for _, s in ipairs(prog) do place(who, s.list, s.x, s.y, true) end
-      for _, s in ipairs(spots) do place(who, s.list, s.x, s.y, false) end
     end
   end
-  DrawAreas(child, viewMap, areas)
 end
 
 ------------------------------------------------------------------------
@@ -702,12 +739,12 @@ local function BuildRows()
   return rows, #names
 end
 
-local function QuestTooltip(owner, q, who)
+local function QuestTooltip(owner, q, who, hint)
   GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
   local c = ColorFor(who)
   GameTooltip:AddLine(string.format("[%d] %s", q.level or 0, q.title), 1, 0.82, 0)
   GameTooltip:AddLine(who, c[1], c[2], c[3])
-  GameTooltip:AddLine("Click to read the quest - Shift-click to link it", 0.5, 0.8, 1)
+  GameTooltip:AddLine(hint or "Click to read the quest - Shift-click to link it", 0.5, 0.8, 1)
   if myQuests[q.id] then GameTooltip:AddLine("You have this quest too", GOLD[1], GOLD[2], GOLD[3]) end
   if q.complete then GameTooltip:AddLine("Ready to turn in", 0.3, 1, 0.3)
   else for _, o in ipairs(q.objs) do GameTooltip:AddLine("  " .. o.text, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9, o.done and 0.5 or 0.9) end end
@@ -722,11 +759,11 @@ local function QuestLink(q)
   return link or string.format("|cffffff00|Hquest:%d:%d|h[%s]|h|r", q.id, q.level or 0, q.title)
 end
 
-local function OpenQuest(q, who)
+local function OpenQuest(q, who, readerOnly)
   if IsModifiedClick and IsModifiedClick("CHATLINK") and ChatEdit_InsertLink then
     if ChatEdit_InsertLink(QuestLink(q)) then return end
   end
-  if myQuests[q.id] and not IsShiftKeyDown() then
+  if myQuests[q.id] and not IsShiftKeyDown() and not readerOnly then
     if QuestLedgerForever_OpenQuest and QuestLedgerForever_OpenQuest(q.id) then return end
     if QuestMapFrame_OpenToQuestDetails then QuestMapFrame_OpenToQuestDetails(q.id) return end
     if QuestLog_OpenToQuestIndex and C_QuestLog and C_QuestLog.GetLogIndexForQuestID then
@@ -847,8 +884,15 @@ local function MakePanel()
       self.icon:Show(); self.inner:Hide(); self.q:Hide()
       self.edge:Show(); if self.nat then for _, t in pairs(self.nat) do t:Hide() end end
       self:SetParent(globus)
+      -- it used to sit on the map's title bar, which Globus hides (alpha 0, no mouse): undo that
+      local function unmute(f)
+        f:SetAlpha(1)
+        if f.EnableMouse then f:EnableMouse(true) end
+        for _, c in ipairs({ f:GetChildren() }) do unmute(c) end
+      end
+      unmute(self)
       self:SetSize(24, 24)
-      self:SetPoint("TOPLEFT", globus, "TOPLEFT", 6, -20) -- under the move bar, clear of other addons' map buttons
+      self:SetPoint("TOPLEFT", globus, "TOPLEFT", 6, -30) -- under the move bar, clear of other addons' map buttons
       self:SetFrameStrata(globus:GetFrameStrata())
       self:SetFrameLevel(globus:GetFrameLevel() + 30)
     elseif (db.buttonStyle == "stack" or db.buttonStyle == nil) and toggle then  -- stacked above the map's quest-log "?" toggle
@@ -997,7 +1041,7 @@ local function RefreshPanel()
   -- Globus + Quest Ledger: corner icon opens the Ledger's party view beside the map
   if globus and ledger then
     panel:Hide()
-    tab:SetShown(mapOpen and db.dock ~= false)
+    tab:Hide() -- no QuestMates button on the Globus map
     local _, n = BuildRows()
     tab.badge:SetText(n > 0 and n or "")
     tab.on:SetShown(QuestLedgerForever_IsPartyShown and QuestLedgerForever_IsPartyShown() or false)
@@ -1008,7 +1052,7 @@ local function RefreshPanel()
   if not globus and QuestLedgerForever_IsPureMap and QuestLedgerForever_IsPureMap() then
     tab:Hide(); panel:Hide(); return
   end
-  tab:SetShown(mapOpen and db.dock ~= false)
+  tab:SetShown(mapOpen and db.dock ~= false and not globus) -- no button on the Globus map
   local rows, nFriends = BuildRows()
   tab.badge:SetText(nFriends > 0 and nFriends or "")
   tab.on:SetShown(db.panelOpen and true or false)
@@ -1182,6 +1226,22 @@ local function MapSize(m)
   if w and w > 0 and h and h > 0 then sizeCache[m] = { w, h }; return w, h end
 end
 
+local function NearestFor(who, q)
+  local pm, px, py = PlayerPos()
+  if not pm then return nil end
+  local best
+  for _, p in ipairs(q.pois or {}) do
+    local x, y = PlayerOnMap(pm, px, py, p.m)
+    local w, h = MapSize(p.m)
+    if x and w then
+      local dxE, dyS = (p.x - x) * w, (p.y - y) * h
+      local d = math.sqrt(dxE * dxE + dyS * dyS)
+      if not best or d < best.d then best = { who = who, q = q, d = d, dxE = dxE, dyS = dyS, p = p } end
+    end
+  end
+  return best
+end
+
 local function ArrowTargets()
   local list = {}
   local pm, px, py = PlayerPos()
@@ -1285,11 +1345,24 @@ arrow.driver:SetScript("OnUpdate", function(_, el)
   arrowElapsed = arrowElapsed + el
   if arrowElapsed < 0.05 then return end
   arrowElapsed = 0
-  if not db or not db.pointer or not Channel() or (IsInInstance and IsInInstance()) then arrow:Hide(); MarkerClear(); return end
-  local list = ArrowTargets()
+  if not db then return end
+  if mk.hold then arrow:Hide(); MarkerClear(); return end -- my own quest is pinned from the tracker
+  local pinT
+  if mk.pin then
+    local fr = friends[mk.pin.who]
+    local q = fr and GroupMembers()[mk.pin.who] and fr.quests[mk.pin.qid]
+    if not q then mk.pin = nil else pinT = NearestFor(mk.pin.who, q) end
+  end
+  local list
+  if pinT then
+    list = { pinT }
+  else
+    if mk.pin or not db.pointer or not Channel() or (IsInInstance and IsInInstance()) then arrow:Hide(); MarkerClear(); return end
+    list = ArrowTargets()
+  end
   if #list == 0 then arrow:Hide(); arrowTarget = nil; MarkerClear(); return end
   if not arrow.placed then PlaceArrow(); arrow.placed = true end
-  local t = list[(arrowSkip % #list) + 1]
+  local t = pinT or list[(arrowSkip % #list) + 1]
   arrowTarget = t
   if db.arrowStyle ~= "classic" and MarkerSupported() then
     if MarkerTo(t) then arrow:Hide(); return end
@@ -1421,6 +1494,11 @@ end
 
 local function RefreshFloating()
   for _, l in ipairs(lines) do l:Hide() end
+  if db.unifiedTracker ~= false then
+    list:Hide(); trk:Hide()
+    if QuestMatesTracker_Refresh then pcall(QuestMatesTracker_Refresh) end
+    return
+  end
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
   local rows, nFriends = BuildRows()
   if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); trk:Hide(); return end
@@ -1495,13 +1573,36 @@ QuestMatesAPI = {
   Rows = function() if db then return BuildRows() end return {}, 0 end,
   ToggleCollapsed = function(who) collapsed[who] = not collapsed[who]; RefreshList() end,
   IsCollapsed = function(who) return collapsed[who] end,
-  OpenQuest = function(q, who) OpenQuest(q, who) end,
-  QuestTooltip = function(owner, q, who) QuestTooltip(owner, q, who) end,
+  OpenQuest = function(q, who, readerOnly) OpenQuest(q, who, readerOnly) end,
+  QuestTooltip = function(owner, q, who, hint) QuestTooltip(owner, q, who, hint) end,
   Color = function(who) return ColorFor(who) end,
   Disc = MEDIA .. "Disc",
   Refresh = function() RefreshList() end,
   -- true while QuestMates has the game's in-world marker on a friend's quest (Quest Ledger then leaves its color alone)
   OwnsMarker = function() return MarkerOwned() and true or false end,
+  -- used by the QuestMates tracker (Tracker.lua)
+  Friends = function()
+    local out, members = {}, GroupMembers()
+    if not db then return out end
+    for who, fr in pairs(friends) do if members[who] then out[#out + 1] = who end end
+    table.sort(out); return out
+  end,
+  MyQuest = function(qid) return myQuests[qid] end,
+  FriendQuests = function(who)
+    local fr, out = friends[who], {}
+    if not fr then return out end
+    for _, q in pairs(fr.quests) do out[#out + 1] = q end
+    table.sort(out, function(x, y)
+      if (x.level or 0) ~= (y.level or 0) then return (x.level or 0) < (y.level or 0) end -- lowest level first
+      return (x.title or "") < (y.title or "")
+    end)
+    return out
+  end,
+  FriendQuest = function(who, qid) local fr = friends[who]; return fr and fr.quests[qid] end,
+  PinFriend = function(who, q) mk.hold = nil; mk.pin = { who = who, qid = q.id }; mk.key = nil end,
+  HoldPointer = function(on) mk.hold = on and true or nil; if on then mk.pin = nil end end,
+  Pinned = function() return mk.pin and (mk.pin.who .. ":" .. mk.pin.qid) or nil, mk.hold end,
+  Unpin = function() mk.pin = nil; mk.hold = nil; MarkerClear() end,
 }
 
 ------------------------------------------------------------------------
@@ -1541,6 +1642,7 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if not db.stackDefaulted then db.buttonStyle = "stack"; db.stackDefaulted = true end
     db.panelStyle = db.panelStyle or "inside"
     db.trackerStyle = db.trackerStyle or "native"
+    if db.unifiedTracker == nil then db.unifiedTracker = true end
     C_Timer.After(0, MakeOptions)
     db.colors = db.colors or {}
     cdb.pins = cdb.pins or {}
@@ -1753,9 +1855,11 @@ MakeOptions = function()
   check("Friends' quest areas on the map", function() return db.mapPins end, function(v) db.mapPins = v end)
   check("Highlight quests we share (gold)", function() return db.highlightShared ~= false end, function(v) db.highlightShared = v end)
   check("Spots where friends made progress", function() return db.progressPins end, function(v) db.progressPins = v end)
-  check("Shade friends' quest areas", function() return db.areas ~= false end, function(v) db.areas = v end)
   y = y - 6
   header("Floating tracker")
+  check("Replace the default quest tracker (My quests / Party tabs)", function() return db.unifiedTracker ~= false end,
+    function(v) db.unifiedTracker = v; if QuestMatesTracker_Apply then QuestMatesTracker_Apply() end end,
+    "Hides Blizzard's objective tracker and shows the QuestMates tracker in its place.")
   check("Show the floating tracker when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
   choice("Tracker style", "trackerStyle", { { "native", "Like the quest tracker" }, { "box", "Box (classic)" } })
   y = y - 6
@@ -1806,9 +1910,6 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "map" then
     db.mapPins = not db.mapPins; RefreshPins()
     Print("Map markers " .. (db.mapPins and "on" or "off"))
-  elseif msg == "areas" then
-    db.areas = (db.areas == false); RefreshPins()
-    Print("Friend quest areas " .. (db.areas ~= false and "on" or "off"))
   elseif msg == "shared" then
     db.highlightShared = not db.highlightShared; RefreshAll()
     Print("Shared quest highlight " .. (db.highlightShared and "on" or "off"))
@@ -1834,6 +1935,44 @@ SlashCmdList.QUESTMATES = function(msg)
   elseif msg == "sync" then
     if not Channel() then Print("You're not in a group.") return end
     Send("H"); ScheduleBroadcast(true, 0.5); Print("Asking your group for their quests...")
+  elseif msg == "pindebug" then
+    -- prints how the game draws its own quest icons, so friend dots can copy the look
+    local pools = WorldMapFrame and WorldMapFrame.pinPools
+    local n = 0
+    local function dumpRegion(r, depth)
+      local kind = r.GetObjectType and r:GetObjectType() or "?"
+      local line = string.rep("  ", depth) .. kind .. " " .. (r:GetDebugName() or ""):match("[^%.]*$")
+      if kind == "Texture" then
+        local atlas = r.GetAtlas and r:GetAtlas()
+        local l, rr, t, b = r:GetTexCoord()
+        line = line .. " atlas=" .. tostring(atlas) .. " tex=" .. tostring(r:GetTexture())
+          .. (" size=%dx%d"):format(r:GetWidth() or 0, r:GetHeight() or 0)
+          .. (" layer=%s"):format(tostring(r:GetDrawLayer())) .. " shown=" .. tostring(r:IsShown())
+          .. (" tc=%.2f,%.2f,%.2f,%.2f"):format(l or 0, rr or 0, t or 0, b or 0)
+      elseif kind == "FontString" then
+        line = line .. " text=" .. tostring(r:GetText())
+      end
+      print(line)
+    end
+    local function dump(f, depth)
+      if depth > 2 then return end
+      print(string.rep("  ", depth) .. (f:GetObjectType() or "?") .. " " .. tostring(f.pinTemplate or "")
+        .. (" size=%dx%d"):format(f:GetWidth() or 0, f:GetHeight() or 0)
+        .. " questID=" .. tostring(f.questID) .. " complete=" .. tostring(f.questID and C_QuestLog and C_QuestLog.IsComplete and C_QuestLog.IsComplete(f.questID)))
+      for _, r in ipairs({ f:GetRegions() }) do dumpRegion(r, depth + 1) end
+      for _, c in ipairs({ f:GetChildren() }) do dump(c, depth + 1) end
+    end
+    if pools then
+      for tpl, pool in pairs(pools) do
+        if tostring(tpl):find("Quest", 1, true) and not tostring(tpl):find("Blob", 1, true) and pool.EnumerateActive then
+          for pin in pool:EnumerateActive() do
+            n = n + 1
+            if n <= 3 then dump(pin, 0) end
+          end
+        end
+      end
+    end
+    if n == 0 then Print("open the map on a zone with quest icons first.") end
   elseif msg == "debug" then
     ScanLog()
     local nq, npoi, npin = 0, 0, 0

@@ -801,6 +801,10 @@ end
 
 local function AnchorPanel()
   if not panel then return end
+  local g = GlobusFrame()
+  local parent = g or WorldMapFrame
+  if panel:GetParent() ~= parent then panel:SetParent(parent) end
+  panel:SetAlpha(1)
   panel:ClearAllPoints()
   local q = (db.panelStyle ~= "side") and QuestListArea() or nil
   if q then
@@ -816,7 +820,7 @@ local function AnchorPanel()
   end
   -- one strata above the map so the quest log's own scroll lists can never draw on top
   local up = { BACKGROUND = "LOW", LOW = "MEDIUM", MEDIUM = "HIGH", HIGH = "DIALOG", DIALOG = "FULLSCREEN", FULLSCREEN = "FULLSCREEN_DIALOG" }
-  panel:SetFrameStrata(up[WorldMapFrame:GetFrameStrata()] or "DIALOG")
+  panel:SetFrameStrata(up[parent:GetFrameStrata()] or "DIALOG")
   panel:SetFrameLevel(50)
   panel:Raise()
 end
@@ -979,12 +983,6 @@ local function MakePanel()
   b.badge = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
   b.badge:SetPoint("BOTTOMRIGHT", 2, -2)
   b:SetScript("OnClick", function()
-    -- Globus + Quest Ledger: the group list is the Ledger's party view, docked beside the map
-    if GlobusFrame() and QuestLedgerForever_ToggleParty then
-      pcall(QuestLedgerForever_ToggleParty)
-      RefreshList()
-      return
-    end
     db.panelOpen = not db.panelOpen
     RefreshList()
   end)
@@ -992,7 +990,6 @@ local function MakePanel()
     GameTooltip:SetOwner(s, "ANCHOR_RIGHT")
     GameTooltip:AddLine("QuestMates")
     local open = db.panelOpen
-    if GlobusFrame() and QuestLedgerForever_IsPartyShown then open = QuestLedgerForever_IsPartyShown() end
     GameTooltip:AddLine(open and "Back to your quests" or "Show your group's quests", 1, 1, 1)
     GameTooltip:Show()
   end)
@@ -1035,24 +1032,10 @@ end
 
 local function RefreshPanel()
   if not panel then return end
-  local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
   local globus = GlobusFrame()
-  local ledger = QuestLedgerForever_ToggleParty ~= nil
-  -- Globus + Quest Ledger: corner icon opens the Ledger's party view beside the map
-  if globus and ledger then
-    panel:Hide()
-    tab:Hide() -- no QuestMates button on the Globus map
-    local _, n = BuildRows()
-    tab.badge:SetText(n > 0 and n or "")
-    tab.on:SetShown(QuestLedgerForever_IsPartyShown and QuestLedgerForever_IsPartyShown() or false)
-    tab:Reanchor()
-    return
-  end
-  -- Quest Ledger Forever without Globus: no quest-log elements on the map (pins stay)
-  if not globus and QuestLedgerForever_IsPureMap and QuestLedgerForever_IsPureMap() then
-    tab:Hide(); panel:Hide(); return
-  end
-  tab:SetShown(mapOpen and db.dock ~= false and not globus) -- no button on the Globus map
+  -- QuestMates keeps its own map button and party panel, also with Globus / Quest Ledger Forever
+  local mapOpen = (globus and globus:IsShown()) or (WorldMapFrame and WorldMapFrame:IsShown())
+  tab:SetShown(mapOpen and db.dock ~= false)
   local rows, nFriends = BuildRows()
   tab.badge:SetText(nFriends > 0 and nFriends or "")
   tab.on:SetShown(db.panelOpen and true or false)
@@ -1494,12 +1477,7 @@ end
 
 local function RefreshFloating()
   for _, l in ipairs(lines) do l:Hide() end
-  -- the Objective Forever addon (separate) shows party quests in its own tracker
-  if ObjectiveForeverIsOn and ObjectiveForeverIsOn() then
-    list:Hide(); trk:Hide()
-    if QuestMatesTracker_Refresh then pcall(QuestMatesTracker_Refresh) end
-    return
-  end
+  if QuestMatesTracker_Refresh then pcall(QuestMatesTracker_Refresh) end -- keep Objective Forever's Party tab in step
   local mapOpen = WorldMapFrame and WorldMapFrame:IsShown()
   local rows, nFriends = BuildRows()
   if not db.listShown or nFriends == 0 or mapOpen then list:Hide(); trk:Hide(); return end

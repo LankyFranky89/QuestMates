@@ -1323,6 +1323,11 @@ local function MarkerTo(t)
     end
   end
   if mk.failed then return false end
+  -- the game can accept the marker but still hide it (target state 0 = invalid): use the arrow then
+  if C_Navigation and C_Navigation.GetTargetState then
+    local ok, st = pcall(C_Navigation.GetTargetState)
+    if ok and st == 0 and MarkerOwned() then return false end
+  end
   MarkerColor()
   return true
 end
@@ -1639,7 +1644,9 @@ ev:SetScript("OnEvent", function(_, e, a1, a2, a3, a4)
     if db.itemAlerts == nil then db.itemAlerts = true end
     if db.combatWarn == nil then db.combatWarn = true end
     if db.pointer == nil then db.pointer = true end
-    db.arrowStyle = db.arrowStyle or "blizzard"
+    -- WoW Forever never shows the game's diamond marker, so friends get the arrow (once, for everyone)
+    if not db.arrowBack then db.arrowBack = true; db.arrowStyle = "classic" end
+    db.arrowStyle = db.arrowStyle or "classic"
     if not db.stackDefaulted then db.buttonStyle = "stack"; db.stackDefaulted = true end
     db.panelStyle = db.panelStyle or "inside"
     db.trackerStyle = db.trackerStyle or "native"
@@ -1866,7 +1873,7 @@ MakeOptions = function()
   check("Chat message when a friend loots a quest item", function() return db.itemAlerts end, function(v) db.itemAlerts = v end)
   check("Warn when I pull a quest mob a friend doesn't have the quest for", function() return db.combatWarn end, function(v) db.combatWarn = v end)
   check("Point to quests my friends track", function() return db.pointer end, function(v) db.pointer = v end)
-  choice("Pointer style", "arrowStyle", { { "blizzard", "Game marker (like Quest Ledger)" }, { "classic", "Arrow (classic)" } })
+  choice("Pointer style", "arrowStyle", { { "classic", "Arrow" }, { "blizzard", "Game marker (WoW Forever hides it)" } })
   check("Stamp quest links in chat (done / in log)", function() return not (db.stamp and db.stamp.enabled == false) end,
     function(v) db.stamp = db.stamp or {}; db.stamp.enabled = v end)
 

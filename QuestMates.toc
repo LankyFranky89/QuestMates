@@ -2,7 +2,7 @@
 ## Title: QuestMates
 ## Notes: Shows your party members' quests on the world map in their own color, plus a list of who is on what. Also marks quest links in chat as done/in log. Everyone in the group needs QuestMates.
 ## Author: Frank
-## Version: 1.14.3
+## Version: 1.14.4
 ## IconTexture: Interface\AddOns\QuestMates\PartyIcon
 ## SavedVariables: QuestMatesDB
 ## SavedVariablesPerCharacter: QuestMatesCharDB

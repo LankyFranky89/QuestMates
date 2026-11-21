@@ -8,5 +8,4 @@
 ## SavedVariablesPerCharacter: QuestMatesCharDB
 
 QuestMates.lua
-Tracker.lua
 Stamp.lua

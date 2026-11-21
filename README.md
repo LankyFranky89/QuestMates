@@ -49,11 +49,4 @@ Download the repo, put the `QuestMates` folder in `Interface\AddOns`, then `/rel
 
 ## Quest tracker
 
-QuestMates replaces Blizzard's objective tracker with its own (`/qmt` toggles it).
-
-- **Quests** and **Party Quests** (party icon on the Quests bar, only while grouped with QuestMates friends)
-- **Professions** section for recipes tracked in the profession window, with reagent counts
-- Click a quest for the map, right-click for the quest log (friends' quests open the QuestMates reader), click the quest icon for the in-world marker, Shift-click to stop tracking
-- Objectives change color as they fill and flash when they progress
-- Stays clear of the right-side action bars, sits under every other window, scrolls with the mouse wheel or the slim scroll bar
-- `/qmt reset` - back to the default spot, `/qmt scale 1.2` - size, `/qmt debug`, `/qmt icons`
+The quest tracker is now its own addon, **Objective Forever**. With both installed, its Party Quests tab shows your QuestMates friends' quests.

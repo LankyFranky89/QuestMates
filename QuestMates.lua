@@ -1494,7 +1494,8 @@ end
 
 local function RefreshFloating()
   for _, l in ipairs(lines) do l:Hide() end
-  if db.unifiedTracker ~= false then
+  -- the Objective Forever addon (separate) shows party quests in its own tracker
+  if ObjectiveForeverIsOn and ObjectiveForeverIsOn() then
     list:Hide(); trk:Hide()
     if QuestMatesTracker_Refresh then pcall(QuestMatesTracker_Refresh) end
     return
@@ -1857,9 +1858,6 @@ MakeOptions = function()
   check("Spots where friends made progress", function() return db.progressPins end, function(v) db.progressPins = v end)
   y = y - 6
   header("Floating tracker")
-  check("Replace the default quest tracker (My quests / Party tabs)", function() return db.unifiedTracker ~= false end,
-    function(v) db.unifiedTracker = v; if QuestMatesTracker_Apply then QuestMatesTracker_Apply() end end,
-    "Hides Blizzard's objective tracker and shows the QuestMates tracker in its place.")
   check("Show the floating tracker when the map is closed", function() return db.listShown end, function(v) db.listShown = v end)
   choice("Tracker style", "trackerStyle", { { "native", "Like the quest tracker" }, { "box", "Box (classic)" } })
   y = y - 6

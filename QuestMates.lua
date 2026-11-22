@@ -202,7 +202,8 @@ local function ScanLog()
     local objs = Objectives(qid, logIndex)
     quests[qid] = { id = qid, title = title or ("Quest " .. qid), level = level or 0,
       complete = complete and true or false, objs = objs, pois = QuestPOIs(qid, onMap),
-      tracked = IsTracked(qid, logIndex) }
+      tracked = IsTracked(qid, logIndex),
+      pinned = (ObjectiveForever_PinnedQuest and ObjectiveForever_PinnedQuest() == qid) or false }
     -- progress pins: an objective count went up since last scan
     local prev = mySnapshot[qid]
     local snap = {}
@@ -296,7 +297,7 @@ local function Encode(q)
   for i, p in ipairs(q.pois) do pois[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
   for i, p in ipairs(q.pins or {}) do pins[i] = p.m .. "," .. Num(p.x) .. "," .. Num(p.y) end
   return table.concat({ "Q", q.id, q.level or 0, q.complete and 1 or 0, Clean(q.title),
-    table.concat(objs, OSEP), table.concat(pois, PSEP), table.concat(pins, PSEP), q.tracked and 1 or 0 }, SEP)
+    table.concat(objs, OSEP), table.concat(pois, PSEP), table.concat(pins, PSEP), q.tracked and 1 or 0, q.pinned and 1 or 0 }, SEP)
 end
 
 local function Broadcast(force)
@@ -346,7 +347,8 @@ trackPoll:SetScript("OnUpdate", function(_, el)
     if qid and IsTracked(qid, i) then ids[#ids + 1] = qid end
   end
   table.sort(ids)
-  local sig = table.concat(ids, ",")
+  -- the quest picked in Objective Forever (diamond + 3D arrow) counts too
+  local sig = table.concat(ids, ",") .. "|" .. tostring(ObjectiveForever_PinnedQuest and ObjectiveForever_PinnedQuest())
   if sig ~= lastTracked then lastTracked = sig; ScheduleBroadcast(false, 0.2) end
 end)
 
@@ -416,7 +418,14 @@ local function Handle(sender, msg)
       end
     end
     fr.quests[qid] = { id = qid, level = tonumber(f[3]) or 0, complete = f[4] == "1", title = f[5] or "?",
-      objs = objs, pois = DecodePoints(f[7]), pins = DecodePoints(f[8]), tracked = f[9] == "1" }
+      objs = objs, pois = DecodePoints(f[7]), pins = DecodePoints(f[8]), tracked = f[9] == "1", pinned = f[10] == "1" }
+    -- a party member picked (or dropped) a quest in Objective Forever: newest pick wins the arrow
+    local nowPinned = fr.quests[qid].pinned
+    if fr.synced and nowPinned and not (prev and prev.pinned) and ObjectiveForever_FriendPinned then
+      pcall(ObjectiveForever_FriendPinned, sender, fr.quests[qid])
+    elseif prev and prev.pinned and not nowPinned and ObjectiveForever_FriendUnpinned then
+      pcall(ObjectiveForever_FriendUnpinned, sender, qid)
+    end
   elseif kind == "S" then
     local keep = {}
     for _, id in ipairs(Split(f[2], ",")) do keep[tonumber(id) or 0] = true end
@@ -1594,6 +1603,15 @@ QuestMatesAPI = {
     table.sort(out); return out
   end,
   MyQuest = function(qid) return myQuests[qid] end,
+  -- Objective Forever: my picked quest changed, tell the party now
+  PinChanged = function() ScheduleBroadcast(false, 0.2) end,
+  NearestPoint = function(who, qid)
+    local fr = friends[who]; local q = fr and fr.quests[qid]
+    if not q then return nil end
+    local t = NearestFor(who, q)
+    if t then return t.p end
+    return q.pois and q.pois[1]
+  end,
   FriendQuests = function(who)
     local fr, out = friends[who], {}
     if not fr then return out end

@@ -1,3 +1,7 @@
+local function Secret(v) -- chat hidden by the game (or faked by /cc secret)
+  if CopyCatFakeSecret and CopyCatFakeSecret > GetTime() then return true end
+  return issecretvalue ~= nil and issecretvalue(v) == true
+end
 -- QuestMates: Stamp module (formerly the QuestStamp addon)
 -- Marks quest links in chat: green check = done, yellow ? = in your log
 local ADDON = ...
@@ -47,6 +51,7 @@ local function Tag(id)
 end
 
 local function Filter(self, event, msg, ...)
+  if Secret(msg) then return false end
   if not db or not db.enabled or type(msg) ~= "string" or not msg:find("|Hquest:") then return false end
   -- link may be wrapped in a colour code: |cff...|Hquest:..|h[Name]|h|r
   local new = msg:gsub("(|Hquest:(%d+)[^|]*|h%[.-%]|h)", function(link, id)

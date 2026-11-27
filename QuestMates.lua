@@ -2043,3 +2043,23 @@ SlashCmdList.QUESTMATES = function(msg)
     Print("/qm options - settings window | /qm tracker | /qm arrow | /qm - show/hide the floating list (or the QuestMates button on the map) | /qm map | /qm shared | /qm progress | /qm alert | /qm items | /qm pull (missing-quest warning) | /qm dock (map button on/off) | /qm scale 1.3 | /qm sync | /qm clear | /qm debug")
   end
 end
+
+-- Globus top bar: a button to show / hide friends' quests (areas and markers) on the map
+do
+  local gb = CreateFrame("Frame")
+  gb:RegisterEvent("PLAYER_LOGIN")
+  gb:SetScript("OnEvent", function()
+    if type(Globus_AddToolButton) ~= "function" then return end
+    Globus_AddToolButton({
+      icon = "Interface\\AddOns\\Globus\\IconFriends",
+      title = "Friends' quests",
+      tip = "Your group's quest areas and markers on the map (QuestMates).",
+      isOn = function() return db ~= nil and db.mapPins ~= false end,
+      onClick = function()
+        if not db then return end
+        db.mapPins = not db.mapPins
+        RefreshPins()
+      end,
+    })
+  end)
+end
